@@ -1,6 +1,8 @@
 import { useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useParams } from 'react-router-dom';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import clsx from 'clsx';
 import {
   ShieldAlert,
   Eye,
@@ -8,6 +10,8 @@ import {
   HardHat,
   Download,
   Loader2,
+  Plus,
+  X,
 } from 'lucide-react';
 import {
   Button,
@@ -18,7 +22,7 @@ import {
   SkeletonTable,
 } from '@/shared/ui';
 import { DateDisplay } from '@/shared/ui/DateDisplay';
-import { apiGet, triggerDownload } from '@/shared/lib/api';
+import { apiGet, apiPost, triggerDownload } from '@/shared/lib/api';
 import { useProjectContextStore } from '@/stores/useProjectContextStore';
 import { useAuthStore } from '@/stores/useAuthStore';
 import { useToastStore } from '@/stores/useToastStore';
@@ -184,9 +188,16 @@ async function downloadExcelExport(url: string, fallbackFilename: string): Promi
 
 /* ── Main Page ────────────────────────────────────────────────────────── */
 
+const inputCls =
+  'h-10 w-full rounded-lg border border-border bg-surface-primary px-3 text-sm focus:outline-none focus:ring-2 focus:ring-oe-blue/30 focus:border-oe-blue';
+const textareaCls =
+  'w-full rounded-lg border border-border bg-surface-primary px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-oe-blue/30 focus:border-oe-blue resize-none';
+
 export function SafetyPage() {
   const { t } = useTranslation();
-  const projectId = useProjectContextStore((s) => s.activeProjectId);
+  const { projectId: routeProjectId } = useParams<{ projectId?: string }>();
+  const activeProjectId = useProjectContextStore((s) => s.activeProjectId);
+  const projectId = routeProjectId || activeProjectId || '';
   const projectName = useProjectContextStore((s) => s.activeProjectName);
 
   const [activeTab, setActiveTab] = useState<SafetyTab>('incidents');
@@ -287,8 +298,45 @@ export function SafetyPage() {
 
 function IncidentsTab({ projectId }: { projectId: string }) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
   const addToast = useToastStore((s) => s.addToast);
+  const [showCreate, setShowCreate] = useState(false);
+  const [incidentForm, setIncidentForm] = useState({
+    incident_date: new Date().toISOString().slice(0, 10),
+    incident_type: 'near_miss' as string,
+    description: '',
+    severity: 'minor' as string,
+    treatment_type: '' as string,
+    location: '',
+  });
+
+  const createMut = useMutation({
+    mutationFn: (data: typeof incidentForm) =>
+      apiPost('/v1/safety/incidents', {
+        project_id: projectId,
+        incident_date: data.incident_date,
+        incident_type: data.incident_type,
+        description: data.description,
+        treatment_type: data.treatment_type || undefined,
+        location: data.location || undefined,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['safety-incidents', projectId] });
+      setShowCreate(false);
+      setIncidentForm({
+        incident_date: new Date().toISOString().slice(0, 10),
+        incident_type: 'near_miss',
+        description: '',
+        severity: 'minor',
+        treatment_type: '',
+        location: '',
+      });
+      addToast({ type: 'success', title: t('safety.incident_created', { defaultValue: 'Incident reported' }) });
+    },
+    onError: (e: Error) =>
+      addToast({ type: 'error', title: t('common.error', { defaultValue: 'Error' }), message: e.message }),
+  });
 
   const exportMut = useMutation({
     mutationFn: () =>
@@ -346,8 +394,9 @@ function IncidentsTab({ projectId }: { projectId: string }) {
   }
 
   return (
+    <>
     <Card padding="none">
-      {/* Search + Export */}
+      {/* Search + Export + New */}
       <div className="p-4 border-b border-border-light flex items-center gap-3">
         <div className="relative max-w-sm flex-1">
           <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-content-tertiary">
@@ -377,6 +426,14 @@ function IncidentsTab({ projectId }: { projectId: string }) {
           disabled={exportMut.isPending}
         >
           {t('common.export_excel', { defaultValue: 'Export Excel' })}
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          icon={<Plus size={14} />}
+          onClick={() => setShowCreate(true)}
+        >
+          {t('safety.new_incident', { defaultValue: 'New Incident' })}
         </Button>
       </div>
 
@@ -468,6 +525,121 @@ function IncidentsTab({ projectId }: { projectId: string }) {
         </table>
       </div>
     </Card>
+
+    {/* New Incident Modal */}
+    {showCreate && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+        <div className="w-full max-w-lg bg-surface-elevated rounded-xl shadow-xl border border-border animate-card-in mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-border-light">
+            <h2 className="text-lg font-semibold text-content-primary">
+              {t('safety.new_incident', { defaultValue: 'New Incident' })}
+            </h2>
+            <button
+              onClick={() => setShowCreate(false)}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-content-tertiary hover:bg-surface-secondary hover:text-content-primary transition-colors"
+            >
+              <X size={18} />
+            </button>
+          </div>
+          <div className="px-6 py-4 space-y-4">
+            {/* Date */}
+            <div>
+              <label className="block text-sm font-medium text-content-secondary mb-1">
+                {t('safety.date', { defaultValue: 'Date' })} <span className="text-semantic-error">*</span>
+              </label>
+              <input
+                type="date"
+                value={incidentForm.incident_date}
+                onChange={(e) => setIncidentForm((f) => ({ ...f, incident_date: e.target.value }))}
+                className={inputCls}
+              />
+            </div>
+            {/* Type */}
+            <div>
+              <label className="block text-sm font-medium text-content-secondary mb-2">
+                {t('safety.type', { defaultValue: 'Type' })} <span className="text-semantic-error">*</span>
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {['near_miss', 'injury', 'property_damage', 'environmental', 'fire'].map((tp) => (
+                  <button
+                    key={tp}
+                    onClick={() => setIncidentForm((f) => ({ ...f, incident_type: tp }))}
+                    className={clsx(
+                      'rounded-lg px-3 py-1.5 text-sm font-medium transition-colors border',
+                      incidentForm.incident_type === tp
+                        ? 'bg-oe-blue-subtle text-oe-blue border-oe-blue/30'
+                        : 'border-border text-content-tertiary hover:text-content-secondary',
+                    )}
+                  >
+                    {t(`safety.type_${tp}`, { defaultValue: tp.replace(/_/g, ' ') })}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* Description */}
+            <div>
+              <label className="block text-sm font-medium text-content-secondary mb-1">
+                {t('tasks.field_description', { defaultValue: 'Description' })} <span className="text-semantic-error">*</span>
+              </label>
+              <textarea
+                value={incidentForm.description}
+                onChange={(e) => setIncidentForm((f) => ({ ...f, description: e.target.value }))}
+                rows={3}
+                className={textareaCls}
+                placeholder={t('safety.incident_desc_placeholder', { defaultValue: 'Describe what happened...' })}
+              />
+            </div>
+            {/* Location */}
+            <div>
+              <label className="block text-sm font-medium text-content-secondary mb-1">
+                {t('safety.location', { defaultValue: 'Location' })}
+              </label>
+              <input
+                value={incidentForm.location}
+                onChange={(e) => setIncidentForm((f) => ({ ...f, location: e.target.value }))}
+                className={inputCls}
+                placeholder={t('safety.location_placeholder', { defaultValue: 'e.g. Building A, Level 3' })}
+              />
+            </div>
+            {/* Treatment */}
+            <div>
+              <label className="block text-sm font-medium text-content-secondary mb-1">
+                {t('safety.treatment', { defaultValue: 'Treatment' })}
+              </label>
+              <select
+                value={incidentForm.treatment_type}
+                onChange={(e) => setIncidentForm((f) => ({ ...f, treatment_type: e.target.value }))}
+                className={inputCls}
+              >
+                <option value="">{t('common.none', { defaultValue: 'None' })}</option>
+                <option value="first_aid">{t('safety.treatment_first_aid', { defaultValue: 'First Aid' })}</option>
+                <option value="medical">{t('safety.treatment_medical', { defaultValue: 'Medical' })}</option>
+                <option value="hospital">{t('safety.treatment_hospital', { defaultValue: 'Hospital' })}</option>
+                <option value="fatality">{t('safety.treatment_fatality', { defaultValue: 'Fatality' })}</option>
+              </select>
+            </div>
+          </div>
+          <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-border-light">
+            <Button variant="ghost" onClick={() => setShowCreate(false)} disabled={createMut.isPending}>
+              {t('common.cancel', { defaultValue: 'Cancel' })}
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => createMut.mutate(incidentForm)}
+              disabled={createMut.isPending || !incidentForm.description.trim() || !incidentForm.incident_date}
+            >
+              {createMut.isPending ? (
+                <Loader2 size={16} className="animate-spin mr-1.5" />
+              ) : (
+                <Plus size={16} className="mr-1.5" />
+              )}
+              <span>{t('safety.report_incident', { defaultValue: 'Report Incident' })}</span>
+            </Button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 
@@ -475,8 +647,39 @@ function IncidentsTab({ projectId }: { projectId: string }) {
 
 function ObservationsTab({ projectId }: { projectId: string }) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
   const addToast = useToastStore((s) => s.addToast);
+  const [showCreate, setShowCreate] = useState(false);
+  const [obsForm, setObsForm] = useState({
+    observation_type: 'unsafe_condition' as string,
+    description: '',
+    location: '',
+    severity: 3,
+    likelihood: 3,
+  });
+
+  const computedRisk = obsForm.severity * obsForm.likelihood;
+
+  const createObsMut = useMutation({
+    mutationFn: (data: typeof obsForm) =>
+      apiPost('/v1/safety/observations', {
+        project_id: projectId,
+        observation_type: data.observation_type,
+        description: data.description,
+        location: data.location || undefined,
+        severity: data.severity,
+        likelihood: data.likelihood,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['safety-observations', projectId] });
+      setShowCreate(false);
+      setObsForm({ observation_type: 'unsafe_condition', description: '', location: '', severity: 3, likelihood: 3 });
+      addToast({ type: 'success', title: t('safety.observation_created', { defaultValue: 'Observation recorded' }) });
+    },
+    onError: (e: Error) =>
+      addToast({ type: 'error', title: t('common.error', { defaultValue: 'Error' }), message: e.message }),
+  });
 
   const exportMut = useMutation({
     mutationFn: () =>
@@ -534,8 +737,9 @@ function ObservationsTab({ projectId }: { projectId: string }) {
   }
 
   return (
+    <>
     <Card padding="none">
-      {/* Search + Export */}
+      {/* Search + Export + New */}
       <div className="p-4 border-b border-border-light flex items-center gap-3">
         <div className="relative max-w-sm flex-1">
           <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-content-tertiary">
@@ -565,6 +769,14 @@ function ObservationsTab({ projectId }: { projectId: string }) {
           disabled={exportMut.isPending}
         >
           {t('common.export_excel', { defaultValue: 'Export Excel' })}
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          icon={<Plus size={14} />}
+          onClick={() => setShowCreate(true)}
+        >
+          {t('safety.new_observation', { defaultValue: 'New Observation' })}
         </Button>
       </div>
 
@@ -646,5 +858,139 @@ function ObservationsTab({ projectId }: { projectId: string }) {
         </table>
       </div>
     </Card>
+
+    {/* New Observation Modal */}
+    {showCreate && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+        <div className="w-full max-w-lg bg-surface-elevated rounded-xl shadow-xl border border-border animate-card-in mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-border-light">
+            <h2 className="text-lg font-semibold text-content-primary">
+              {t('safety.new_observation', { defaultValue: 'New Observation' })}
+            </h2>
+            <button
+              onClick={() => setShowCreate(false)}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-content-tertiary hover:bg-surface-secondary hover:text-content-primary transition-colors"
+            >
+              <X size={18} />
+            </button>
+          </div>
+          <div className="px-6 py-4 space-y-4">
+            {/* Type */}
+            <div>
+              <label className="block text-sm font-medium text-content-secondary mb-2">
+                {t('safety.type', { defaultValue: 'Type' })} <span className="text-semantic-error">*</span>
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {['unsafe_act', 'unsafe_condition', 'positive', 'near_miss'].map((tp) => (
+                  <button
+                    key={tp}
+                    onClick={() => setObsForm((f) => ({ ...f, observation_type: tp }))}
+                    className={clsx(
+                      'rounded-lg px-3 py-1.5 text-sm font-medium transition-colors border',
+                      obsForm.observation_type === tp
+                        ? 'bg-oe-blue-subtle text-oe-blue border-oe-blue/30'
+                        : 'border-border text-content-tertiary hover:text-content-secondary',
+                    )}
+                  >
+                    {t(`safety.obs_type_${tp}`, { defaultValue: tp.replace(/_/g, ' ') })}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* Description */}
+            <div>
+              <label className="block text-sm font-medium text-content-secondary mb-1">
+                {t('tasks.field_description', { defaultValue: 'Description' })} <span className="text-semantic-error">*</span>
+              </label>
+              <textarea
+                value={obsForm.description}
+                onChange={(e) => setObsForm((f) => ({ ...f, description: e.target.value }))}
+                rows={3}
+                className={textareaCls}
+                placeholder={t('safety.obs_desc_placeholder', { defaultValue: 'Describe the observation...' })}
+              />
+            </div>
+            {/* Location */}
+            <div>
+              <label className="block text-sm font-medium text-content-secondary mb-1">
+                {t('safety.location', { defaultValue: 'Location' })}
+              </label>
+              <input
+                value={obsForm.location}
+                onChange={(e) => setObsForm((f) => ({ ...f, location: e.target.value }))}
+                className={inputCls}
+                placeholder={t('safety.location_placeholder', { defaultValue: 'e.g. Building A, Level 3' })}
+              />
+            </div>
+            {/* Severity + Likelihood */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-content-secondary mb-1">
+                  {t('safety.severity', { defaultValue: 'Severity' })} (1-5)
+                </label>
+                <select
+                  value={obsForm.severity}
+                  onChange={(e) => setObsForm((f) => ({ ...f, severity: Number(e.target.value) }))}
+                  className={inputCls}
+                >
+                  {[1, 2, 3, 4, 5].map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-content-secondary mb-1">
+                  {t('safety.likelihood', { defaultValue: 'Likelihood' })} (1-5)
+                </label>
+                <select
+                  value={obsForm.likelihood}
+                  onChange={(e) => setObsForm((f) => ({ ...f, likelihood: Number(e.target.value) }))}
+                  className={inputCls}
+                >
+                  {[1, 2, 3, 4, 5].map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {/* Computed risk score */}
+            <div className="rounded-lg bg-surface-secondary p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-content-secondary">
+                  {t('safety.risk_score', { defaultValue: 'Risk Score' })}
+                </span>
+                <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-sm font-semibold ${riskScoreColor(computedRisk)}`}>
+                  {computedRisk}
+                  <span className="text-xs font-normal opacity-80">
+                    {riskScoreLabel(computedRisk, t)}
+                  </span>
+                </span>
+              </div>
+              <p className="text-xs text-content-quaternary mt-1">
+                {t('safety.risk_formula', { defaultValue: 'Severity x Likelihood = {{score}}', score: computedRisk })}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-border-light">
+            <Button variant="ghost" onClick={() => setShowCreate(false)} disabled={createObsMut.isPending}>
+              {t('common.cancel', { defaultValue: 'Cancel' })}
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => createObsMut.mutate(obsForm)}
+              disabled={createObsMut.isPending || !obsForm.description.trim()}
+            >
+              {createObsMut.isPending ? (
+                <Loader2 size={16} className="animate-spin mr-1.5" />
+              ) : (
+                <Plus size={16} className="mr-1.5" />
+              )}
+              <span>{t('safety.record_observation', { defaultValue: 'Record Observation' })}</span>
+            </Button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

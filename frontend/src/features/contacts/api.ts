@@ -136,18 +136,22 @@ export async function exportContacts(): Promise<void> {
   triggerDownload(blob, filename);
 }
 
-export async function downloadContactsTemplate(): Promise<void> {
+export function downloadContactsTemplate(): void {
   const token = useAuthStore.getState().accessToken;
   const headers: Record<string, string> = {};
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const response = await fetch('/api/v1/contacts/template', { method: 'GET', headers });
-  if (!response.ok) {
-    throw new Error('Failed to download template');
-  }
-
-  const blob = await response.blob();
-  triggerDownload(blob, 'contacts_import_template.xlsx');
+  fetch('/api/v1/contacts/template', { method: 'GET', headers })
+    .then((response) => {
+      if (!response.ok) throw new Error('Failed to download template');
+      return response.blob();
+    })
+    .then((blob) => {
+      triggerDownload(blob, 'contacts_import_template.xlsx');
+    })
+    .catch((err) => {
+      console.error('Template download error:', err);
+    });
 }

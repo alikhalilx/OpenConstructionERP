@@ -670,7 +670,7 @@ export function BIMPage() {
   const projectId = urlProjectId || contextProjectId || '';
 
   const [activeModelId, setActiveModelId] = useState<string | null>(null);
-  const [showUpload, setShowUpload] = useState(false);
+  const [showUploadOverride, setShowUploadOverride] = useState<boolean | null>(null);
   const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState('');
@@ -683,10 +683,14 @@ export function BIMPage() {
     enabled: !!projectId,
   });
 
+  // Show upload card automatically when no models exist, or by manual toggle
+  const hasModels = (modelsQuery.data?.items?.length ?? 0) > 0;
+  const showUpload = showUploadOverride !== null ? showUploadOverride : !hasModels && !modelsQuery.isLoading;
+
   // Auto-select first model
   useEffect(() => {
     if (modelsQuery.data?.items?.length && !activeModelId) {
-      const first = modelsQuery.data.models[0];
+      const first = modelsQuery.data.items[0];
       if (first) setActiveModelId(first.id);
     }
   }, [modelsQuery.data, activeModelId]);
@@ -774,7 +778,7 @@ export function BIMPage() {
       // Activate the newly uploaded model
       setActiveModelId(modelId);
       setSelectedElementId(null);
-      setShowUpload(false);
+      setShowUploadOverride(false);
     },
     [queryClient, projectId],
   );
@@ -841,7 +845,7 @@ export function BIMPage() {
             <Button
               variant={showUpload ? 'secondary' : 'primary'}
               size="sm"
-              onClick={() => setShowUpload((prev) => !prev)}
+              onClick={() => setShowUploadOverride((prev) => prev === null ? !showUpload : !prev)}
             >
               {showUpload ? (
                 <>
@@ -881,7 +885,7 @@ export function BIMPage() {
               </div>
             ) : modelsQuery.data?.items?.length ? (
               <div className="space-y-2">
-                {modelsQuery.data.models.map((model) => (
+                {modelsQuery.data.items.map((model) => (
                   <ModelCard
                     key={model.id}
                     model={model}
@@ -907,7 +911,7 @@ export function BIMPage() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={() => setShowUpload(true)}
+                  onClick={() => setShowUploadOverride(true)}
                   className="mt-1"
                 >
                   <Upload size={12} className="me-1" />

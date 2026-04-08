@@ -5,18 +5,23 @@ Endpoints:
     POST   /                    - Create task
     GET    /my-tasks             - List tasks for the current user
     GET    /export               - Export tasks as Excel file
+    GET    /template             - Download import template Excel file
+    POST   /import/file          - Import tasks from Excel/CSV file
     GET    /{task_id}            - Get single task
     PATCH  /{task_id}            - Update task
     DELETE /{task_id}            - Delete task
     POST   /{task_id}/complete   - Mark task as completed
 """
 
+import csv
 import io
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 
 from app.dependencies import CurrentUserId, RequirePermission, SessionDep
@@ -231,6 +236,280 @@ async def export_tasks(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="tasks_export.xlsx"'},
     )
+
+
+# ── Import template ─────────────────────────────────────────────────────────
+
+
+@router.get("/template")
+async def download_task_template() -> StreamingResponse:
+    """Download an Excel template for task import."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Tasks"
+
+    headers = ["Title", "Type", "Status", "Priority", "Due Date", "Description"]
+    header_font = Font(bold=True)
+    header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+
+    for i, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=i, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+
+    # Example row
+    ws.cell(row=2, column=1, value="Review structural drawings for Level 5")
+    ws.cell(row=2, column=2, value="task")
+    ws.cell(row=2, column=3, value="open")
+    ws.cell(row=2, column=4, value="high")
+    ws.cell(row=2, column=5, value="2026-06-15")
+    ws.cell(row=2, column=6, value="Check all beam dimensions against the spec")
+
+    # Add a note sheet with valid values
+    notes = wb.create_sheet("Valid Values")
+    notes.cell(row=1, column=1, value="Type values:").font = Font(bold=True)
+    for i, v in enumerate(["task", "topic", "information", "decision", "personal"], 2):
+        notes.cell(row=i, column=1, value=v)
+    notes.cell(row=1, column=3, value="Status values:").font = Font(bold=True)
+    for i, v in enumerate(["draft", "open", "in_progress", "completed"], 2):
+        notes.cell(row=i, column=3, value=v)
+    notes.cell(row=1, column=5, value="Priority values:").font = Font(bold=True)
+    for i, v in enumerate(["low", "normal", "high", "urgent"], 2):
+        notes.cell(row=i, column=5, value=v)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="tasks_import_template.xlsx"'},
+    )
+
+
+# ── Import tasks from file ──────────────────────────────────────────────────
+
+_TASK_COLUMN_MAP: dict[str, str] = {
+    "title": "title",
+    "name": "title",
+    "task name": "title",
+    "task": "title",
+    "titel": "title",
+    "aufgabe": "title",
+    "type": "task_type",
+    "task type": "task_type",
+    "typ": "task_type",
+    "status": "status",
+    "priority": "priority",
+    "priorität": "priority",
+    "due date": "due_date",
+    "due": "due_date",
+    "fällig": "due_date",
+    "deadline": "due_date",
+    "description": "description",
+    "beschreibung": "description",
+    "details": "description",
+}
+
+_VALID_TASK_TYPES = {"task", "topic", "information", "decision", "personal"}
+_VALID_STATUSES = {"draft", "open", "in_progress", "completed"}
+_VALID_PRIORITIES = {"low", "normal", "high", "urgent"}
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _match_task_column(header: str) -> str | None:
+    """Match a header string to a canonical task column name."""
+    return _TASK_COLUMN_MAP.get(header.strip().lower().replace("_", " "))
+
+
+def _parse_task_rows_from_csv(content: bytes) -> list[dict[str, Any]]:
+    """Parse CSV content into a list of row dicts."""
+    text = content.decode("utf-8-sig", errors="replace")
+    reader = csv.reader(io.StringIO(text))
+    raw_headers = next(reader, None)
+    if not raw_headers:
+        raise ValueError("No headers found")
+
+    column_map: dict[int, str] = {}
+    for idx, hdr in enumerate(raw_headers):
+        canonical = _match_task_column(hdr)
+        if canonical:
+            column_map[idx] = canonical
+
+    rows: list[dict[str, Any]] = []
+    for raw_row in reader:
+        row: dict[str, Any] = {}
+        for idx, val in enumerate(raw_row):
+            canonical = column_map.get(idx)
+            if canonical and val is not None and str(val).strip():
+                row[canonical] = str(val).strip()
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _parse_task_rows_from_excel(content: bytes) -> list[dict[str, Any]]:
+    """Parse Excel (.xlsx) content into a list of row dicts."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    ws = wb.active
+    if ws is None:
+        raise ValueError("No active sheet found")
+
+    rows_iter = ws.iter_rows(values_only=True)
+    raw_headers = next(rows_iter, None)
+    if not raw_headers:
+        wb.close()
+        raise ValueError("No headers found")
+
+    column_map: dict[int, str] = {}
+    for idx, hdr in enumerate(raw_headers):
+        if hdr is not None:
+            canonical = _match_task_column(str(hdr))
+            if canonical:
+                column_map[idx] = canonical
+
+    rows: list[dict[str, Any]] = []
+    for raw_row in rows_iter:
+        row: dict[str, Any] = {}
+        for idx, val in enumerate(raw_row):
+            canonical = column_map.get(idx)
+            if canonical and val is not None and str(val).strip():
+                row[canonical] = str(val).strip()
+        if row:
+            rows.append(row)
+
+    wb.close()
+    return rows
+
+
+@router.post("/import/file")
+async def import_tasks_file(
+    user_id: CurrentUserId,
+    project_id: uuid.UUID = Query(...),
+    file: UploadFile = File(..., description="Excel (.xlsx) or CSV (.csv) file"),
+    _perm: None = Depends(RequirePermission("tasks.create")),
+    service: TaskService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Import tasks from an Excel or CSV file upload.
+
+    Expected columns (flexible auto-detection):
+    - **Title / Task Name** -- task title (required)
+    - **Type / Task Type** -- task type (task, topic, information, decision, personal)
+    - **Status** -- status (draft, open, in_progress, completed)
+    - **Priority** -- priority (low, normal, high, urgent)
+    - **Due Date / Deadline** -- due date in YYYY-MM-DD format
+    - **Description / Details** -- task description
+
+    Returns:
+        Summary with counts of imported, skipped, and error details per row.
+    """
+    filename = (file.filename or "").lower()
+    if not filename.endswith((".xlsx", ".csv", ".xls")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported file type. Please upload an Excel (.xlsx) or CSV (.csv) file.",
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty.",
+        )
+
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File too large. Maximum size is 10 MB.",
+        )
+
+    try:
+        if filename.endswith(".xlsx") or filename.endswith(".xls"):
+            rows = _parse_task_rows_from_excel(content)
+        else:
+            rows = _parse_task_rows_from_csv(content)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to parse file: {exc}",
+        )
+    except Exception as exc:
+        logger.exception("Unexpected error parsing task import file: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to parse file. Please check the format and try again.",
+        )
+
+    if not rows:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No data rows found in file. Check that the first row contains column headers.",
+        )
+
+    imported_count = 0
+    skipped = 0
+    errors: list[dict[str, Any]] = []
+
+    for row_idx, row in enumerate(rows, start=2):
+        try:
+            title = str(row.get("title", "")).strip()
+            if not title:
+                skipped += 1
+                continue
+
+            task_type = str(row.get("task_type", "task")).strip().lower()
+            if task_type not in _VALID_TASK_TYPES:
+                task_type = "task"
+
+            task_status = str(row.get("status", "open")).strip().lower()
+            if task_status not in _VALID_STATUSES:
+                task_status = "open"
+
+            priority = str(row.get("priority", "normal")).strip().lower()
+            if priority not in _VALID_PRIORITIES:
+                priority = "normal"
+
+            due_date = str(row.get("due_date", "")).strip() or None
+            if due_date and not _DATE_RE.match(due_date):
+                errors.append({
+                    "row": row_idx,
+                    "error": f"Invalid date format: {due_date} (expected YYYY-MM-DD)",
+                    "data": {k: str(v)[:100] for k, v in row.items()},
+                })
+                continue
+
+            description = str(row.get("description", "")).strip() or None
+
+            create_data = TaskCreate(
+                project_id=project_id,
+                task_type=task_type,
+                title=title,
+                description=description,
+                status=task_status,
+                priority=priority,
+                due_date=due_date,
+            )
+            await service.create_task(create_data, user_id=user_id)
+            imported_count += 1
+        except Exception as exc:
+            errors.append({
+                "row": row_idx,
+                "error": str(exc)[:200],
+                "data": {k: str(v)[:100] for k, v in row.items()},
+            })
+
+    return {
+        "imported": imported_count,
+        "skipped": skipped,
+        "errors": errors,
+        "total_rows": len(rows),
+    }
 
 
 @router.get("/{task_id}", response_model=TaskResponse)

@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Wallet,
@@ -13,7 +14,9 @@ import {
   Upload,
   Loader2,
   X,
+  Plus,
 } from 'lucide-react';
+import clsx from 'clsx';
 import {
   Button,
   Card,
@@ -24,7 +27,7 @@ import {
 } from '@/shared/ui';
 import { MoneyDisplay } from '@/shared/ui/MoneyDisplay';
 import { DateDisplay } from '@/shared/ui/DateDisplay';
-import { apiGet, apiPatch, triggerDownload } from '@/shared/lib/api';
+import { apiGet, apiPost, apiPatch, triggerDownload } from '@/shared/lib/api';
 import { useToastStore } from '@/stores/useToastStore';
 import { useProjectContextStore } from '@/stores/useProjectContextStore';
 import { useAuthStore } from '@/stores/useAuthStore';
@@ -175,9 +178,14 @@ async function importBudgetsFile(
 
 /* ── Main Page ────────────────────────────────────────────────────────── */
 
+const inputCls =
+  'h-10 w-full rounded-lg border border-border bg-surface-primary px-3 text-sm focus:outline-none focus:ring-2 focus:ring-oe-blue/30 focus:border-oe-blue';
+
 export function FinancePage() {
   const { t } = useTranslation();
-  const projectId = useProjectContextStore((s) => s.activeProjectId);
+  const { projectId: routeProjectId } = useParams<{ projectId?: string }>();
+  const activeProjectId = useProjectContextStore((s) => s.activeProjectId);
+  const projectId = routeProjectId || activeProjectId || '';
   const projectName = useProjectContextStore((s) => s.activeProjectName);
 
   const [activeTab, setActiveTab] = useState<FinanceTab>('budgets');
@@ -295,6 +303,26 @@ function BudgetsTab({ projectId }: { projectId: string }) {
   const [importPending, setImportPending] = useState(false);
   const [importResult, setImportResult] = useState<BudgetImportResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [budgetForm, setBudgetForm] = useState({ wbs_code: '', category: '', original_budget: '' });
+
+  const createBudgetMut = useMutation({
+    mutationFn: (data: { wbs_id: string | null; category: string | null; original_budget: string }) =>
+      apiPost('/v1/finance/budgets', {
+        project_id: projectId,
+        wbs_id: data.wbs_id,
+        category: data.category,
+        original_budget: data.original_budget,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['finance-budgets', projectId] });
+      setShowCreate(false);
+      setBudgetForm({ wbs_code: '', category: '', original_budget: '' });
+      addToast({ type: 'success', title: t('finance.budget_created', { defaultValue: 'Budget line created' }) });
+    },
+    onError: (e: Error) =>
+      addToast({ type: 'error', title: t('common.error', { defaultValue: 'Error' }), message: e.message }),
+  });
 
   const exportBudgetsMut = useMutation({
     mutationFn: () =>
@@ -424,6 +452,14 @@ function BudgetsTab({ projectId }: { projectId: string }) {
           >
             {t('finance.import', { defaultValue: 'Import' })}
           </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<Plus size={14} />}
+            onClick={() => setShowCreate(true)}
+          >
+            {t('finance.new_budget', { defaultValue: 'New Budget Line' })}
+          </Button>
         </div>
       </div>
 
@@ -536,6 +572,86 @@ function BudgetsTab({ projectId }: { projectId: string }) {
       </div>
     </Card>
 
+    {/* New Budget Line Modal */}
+    {showCreate && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+        <div className="w-full max-w-lg bg-surface-elevated rounded-xl shadow-xl border border-border animate-card-in mx-4">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-border-light">
+            <h2 className="text-lg font-semibold text-content-primary">
+              {t('finance.new_budget', { defaultValue: 'New Budget Line' })}
+            </h2>
+            <button
+              onClick={() => setShowCreate(false)}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-content-tertiary hover:bg-surface-secondary hover:text-content-primary transition-colors"
+            >
+              <X size={18} />
+            </button>
+          </div>
+          <div className="px-6 py-4 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-content-secondary mb-1">
+                {t('finance.wbs', { defaultValue: 'WBS Code' })}
+              </label>
+              <input
+                value={budgetForm.wbs_code}
+                onChange={(e) => setBudgetForm((p) => ({ ...p, wbs_code: e.target.value }))}
+                className={inputCls}
+                placeholder="e.g. 1.2.3"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-content-secondary mb-1">
+                {t('finance.category', { defaultValue: 'Category' })} <span className="text-semantic-error">*</span>
+              </label>
+              <input
+                value={budgetForm.category}
+                onChange={(e) => setBudgetForm((p) => ({ ...p, category: e.target.value }))}
+                className={inputCls}
+                placeholder={t('finance.category_placeholder', { defaultValue: 'e.g. Structural Works' })}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-content-secondary mb-1">
+                {t('finance.original', { defaultValue: 'Original Budget' })} <span className="text-semantic-error">*</span>
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                value={budgetForm.original_budget}
+                onChange={(e) => setBudgetForm((p) => ({ ...p, original_budget: e.target.value }))}
+                className={inputCls}
+                placeholder="0.00"
+              />
+            </div>
+          </div>
+          <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-border-light">
+            <Button variant="ghost" onClick={() => setShowCreate(false)} disabled={createBudgetMut.isPending}>
+              {t('common.cancel', { defaultValue: 'Cancel' })}
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => {
+                if (!budgetForm.category.trim() || !budgetForm.original_budget.trim()) return;
+                createBudgetMut.mutate({
+                  wbs_id: budgetForm.wbs_code || null,
+                  category: budgetForm.category,
+                  original_budget: budgetForm.original_budget,
+                });
+              }}
+              disabled={createBudgetMut.isPending || !budgetForm.category.trim() || !budgetForm.original_budget.trim()}
+            >
+              {createBudgetMut.isPending ? (
+                <Loader2 size={16} className="animate-spin mr-1.5" />
+              ) : (
+                <Plus size={16} className="mr-1.5" />
+              )}
+              <span>{t('common.create', { defaultValue: 'Create' })}</span>
+            </Button>
+          </div>
+        </div>
+      </div>
+    )}
+
     {/* Budget Import Modal */}
     {showImport && (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
@@ -645,6 +761,36 @@ function InvoicesTab({ projectId }: { projectId: string }) {
   const addToast = useToastStore((s) => s.addToast);
   const [subTab, setSubTab] = useState<InvoiceSubTab>('payable');
   const [search, setSearch] = useState('');
+  const [showCreate, setShowCreate] = useState(false);
+  const [invoiceForm, setInvoiceForm] = useState({
+    direction: 'payable' as 'payable' | 'receivable',
+    counterparty: '',
+    invoice_date: '',
+    due_date: '',
+    amount: '',
+    description: '',
+  });
+
+  const createInvoiceMut = useMutation({
+    mutationFn: (data: typeof invoiceForm) =>
+      apiPost('/v1/finance/', {
+        project_id: projectId,
+        invoice_direction: data.direction,
+        invoice_date: data.invoice_date,
+        due_date: data.due_date || undefined,
+        amount_total: data.amount,
+        amount_subtotal: data.amount,
+        status: 'draft',
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['finance-invoices', projectId] });
+      setShowCreate(false);
+      setInvoiceForm({ direction: 'payable', counterparty: '', invoice_date: '', due_date: '', amount: '', description: '' });
+      addToast({ type: 'success', title: t('finance.invoice_created', { defaultValue: 'Invoice created' }) });
+    },
+    onError: (e: Error) =>
+      addToast({ type: 'error', title: t('common.error', { defaultValue: 'Error' }), message: e.message }),
+  });
 
   const exportInvoicesMut = useMutation({
     mutationFn: () =>
@@ -744,21 +890,34 @@ function InvoicesTab({ projectId }: { projectId: string }) {
             {t('finance.receivable', { defaultValue: 'Receivable' })}
           </button>
         </div>
-        <Button
-          variant="secondary"
-          size="sm"
-          icon={
-            exportInvoicesMut.isPending ? (
-              <Loader2 size={14} className="animate-spin" />
-            ) : (
-              <Download size={14} />
-            )
-          }
-          onClick={() => exportInvoicesMut.mutate()}
-          disabled={exportInvoicesMut.isPending}
-        >
-          {t('finance.export', { defaultValue: 'Export' })}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={
+              exportInvoicesMut.isPending ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Download size={14} />
+              )
+            }
+            onClick={() => exportInvoicesMut.mutate()}
+            disabled={exportInvoicesMut.isPending}
+          >
+            {t('finance.export', { defaultValue: 'Export' })}
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<Plus size={14} />}
+            onClick={() => {
+              setInvoiceForm((f) => ({ ...f, direction: subTab }));
+              setShowCreate(true);
+            }}
+          >
+            {t('finance.new_invoice', { defaultValue: 'New Invoice' })}
+          </Button>
+        </div>
       </div>
 
       <Card padding="none">
@@ -886,6 +1045,118 @@ function InvoicesTab({ projectId }: { projectId: string }) {
           </div>
         )}
       </Card>
+
+      {/* New Invoice Modal */}
+      {showCreate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+          <div className="w-full max-w-lg bg-surface-elevated rounded-xl shadow-xl border border-border animate-card-in mx-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border-light">
+              <h2 className="text-lg font-semibold text-content-primary">
+                {t('finance.new_invoice', { defaultValue: 'New Invoice' })}
+              </h2>
+              <button
+                onClick={() => setShowCreate(false)}
+                className="flex h-8 w-8 items-center justify-center rounded-lg text-content-tertiary hover:bg-surface-secondary hover:text-content-primary transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-6 py-4 space-y-4">
+              {/* Direction */}
+              <div>
+                <label className="block text-sm font-medium text-content-secondary mb-2">
+                  {t('finance.direction', { defaultValue: 'Direction' })}
+                </label>
+                <div className="flex items-center gap-2">
+                  {(['payable', 'receivable'] as const).map((d) => (
+                    <button
+                      key={d}
+                      onClick={() => setInvoiceForm((f) => ({ ...f, direction: d }))}
+                      className={clsx(
+                        'rounded-lg px-3 py-1.5 text-sm font-medium transition-colors border',
+                        invoiceForm.direction === d
+                          ? 'bg-oe-blue-subtle text-oe-blue border-oe-blue/30'
+                          : 'border-border text-content-tertiary hover:text-content-secondary',
+                      )}
+                    >
+                      {d === 'payable'
+                        ? t('finance.payable', { defaultValue: 'Payable' })
+                        : t('finance.receivable', { defaultValue: 'Receivable' })}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {/* Invoice date */}
+              <div>
+                <label className="block text-sm font-medium text-content-secondary mb-1">
+                  {t('finance.issue_date', { defaultValue: 'Invoice Date' })} <span className="text-semantic-error">*</span>
+                </label>
+                <input
+                  type="date"
+                  value={invoiceForm.invoice_date}
+                  onChange={(e) => setInvoiceForm((f) => ({ ...f, invoice_date: e.target.value }))}
+                  className={inputCls}
+                />
+              </div>
+              {/* Due date */}
+              <div>
+                <label className="block text-sm font-medium text-content-secondary mb-1">
+                  {t('finance.due_date', { defaultValue: 'Due Date' })}
+                </label>
+                <input
+                  type="date"
+                  value={invoiceForm.due_date}
+                  onChange={(e) => setInvoiceForm((f) => ({ ...f, due_date: e.target.value }))}
+                  className={inputCls}
+                />
+              </div>
+              {/* Amount */}
+              <div>
+                <label className="block text-sm font-medium text-content-secondary mb-1">
+                  {t('finance.amount', { defaultValue: 'Amount' })} <span className="text-semantic-error">*</span>
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={invoiceForm.amount}
+                  onChange={(e) => setInvoiceForm((f) => ({ ...f, amount: e.target.value }))}
+                  className={inputCls}
+                  placeholder="0.00"
+                />
+              </div>
+              {/* Description */}
+              <div>
+                <label className="block text-sm font-medium text-content-secondary mb-1">
+                  {t('tasks.field_description', { defaultValue: 'Description' })}
+                </label>
+                <input
+                  value={invoiceForm.description}
+                  onChange={(e) => setInvoiceForm((f) => ({ ...f, description: e.target.value }))}
+                  className={inputCls}
+                  placeholder={t('finance.invoice_desc_placeholder', { defaultValue: 'Optional description' })}
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-border-light">
+              <Button variant="ghost" onClick={() => setShowCreate(false)} disabled={createInvoiceMut.isPending}>
+                {t('common.cancel', { defaultValue: 'Cancel' })}
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() => createInvoiceMut.mutate(invoiceForm)}
+                disabled={createInvoiceMut.isPending || !invoiceForm.invoice_date || !invoiceForm.amount}
+              >
+                {createInvoiceMut.isPending ? (
+                  <Loader2 size={16} className="animate-spin mr-1.5" />
+                ) : (
+                  <Plus size={16} className="mr-1.5" />
+                )}
+                <span>{t('common.create', { defaultValue: 'Create' })}</span>
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

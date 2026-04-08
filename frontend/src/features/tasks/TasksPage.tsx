@@ -12,12 +12,16 @@ import {
   CheckCircle2,
   User,
   Download,
+  Upload,
   Loader2,
+  FileDown,
 } from 'lucide-react';
 import { Button, Card, Badge, EmptyState, Breadcrumb } from '@/shared/ui';
 import { apiGet } from '@/shared/lib/api';
 import { useToastStore } from '@/stores/useToastStore';
 import { useProjectContextStore } from '@/stores/useProjectContextStore';
+import { useAuthStore } from '@/stores/useAuthStore';
+import { triggerDownload } from '@/shared/lib/api';
 // Auth store used for "My Tasks" filter
 import {
   fetchTasks,
@@ -424,6 +428,11 @@ export function TasksPage() {
 
   // State
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPending, setImportPending] = useState(false);
+  const [importResult, setImportResult] = useState<{ imported: number; skipped: number; errors: { row: number; error: string; data: Record<string, string> }[]; total_rows: number } | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<TaskType | ''>('');
   const [myTasksOnly, setMyTasksOnly] = useState(false);
@@ -563,6 +572,62 @@ export function TasksPage() {
     [completeMut],
   );
 
+  const handleImportFile = async () => {
+    if (!importFile || !projectId) return;
+    setImportPending(true);
+    setImportError(null);
+    try {
+      const token = useAuthStore.getState().accessToken;
+      const formData = new FormData();
+      formData.append('file', importFile);
+
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const response = await fetch(
+        `/api/v1/tasks/import/file?project_id=${encodeURIComponent(projectId)}`,
+        { method: 'POST', headers, body: formData },
+      );
+
+      if (!response.ok) {
+        let detail = 'Import failed';
+        try {
+          const body = await response.json();
+          detail = body.detail || detail;
+        } catch { /* ignore */ }
+        throw new Error(detail);
+      }
+
+      const result = await response.json();
+      setImportResult(result);
+      invalidateAll();
+    } catch (err: unknown) {
+      setImportError(err instanceof Error ? err.message : 'Import failed');
+    } finally {
+      setImportPending(false);
+    }
+  };
+
+  const handleDownloadTemplate = async () => {
+    try {
+      const token = useAuthStore.getState().accessToken;
+      const headers: Record<string, string> = { Accept: 'application/octet-stream' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const response = await fetch('/api/v1/tasks/template', { method: 'GET', headers });
+      if (!response.ok) throw new Error('Failed to download template');
+
+      const blob = await response.blob();
+      triggerDownload(blob, 'tasks_import_template.xlsx');
+    } catch (e: unknown) {
+      addToast({
+        type: 'error',
+        title: t('common.error', { defaultValue: 'Error' }),
+        message: e instanceof Error ? e.message : 'Failed to download template',
+      });
+    }
+  };
+
   return (
     <div className="max-w-content mx-auto animate-fade-in">
       {/* Breadcrumb */}
@@ -620,6 +685,20 @@ export function TasksPage() {
             disabled={!projectId || exportMut.isPending}
           >
             {t('tasks.export', { defaultValue: 'Export' })}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<Upload size={14} />}
+            onClick={() => {
+              setShowImportModal(true);
+              setImportFile(null);
+              setImportResult(null);
+              setImportError(null);
+            }}
+            disabled={!projectId}
+          >
+            {t('tasks.import', { defaultValue: 'Import' })}
           </Button>
           <Button
             variant="primary"
@@ -800,6 +879,119 @@ export function TasksPage() {
           onSubmit={handleCreateSubmit}
           isPending={createMut.isPending}
         />
+      )}
+
+      {/* Import Modal */}
+      {showImportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+          <div className="w-full max-w-lg bg-surface-elevated rounded-xl shadow-xl border border-border animate-card-in mx-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border-light">
+              <h2 className="text-lg font-semibold text-content-primary">
+                {t('tasks.import_tasks', { defaultValue: 'Import Tasks' })}
+              </h2>
+              <button
+                onClick={() => setShowImportModal(false)}
+                className="flex h-8 w-8 items-center justify-center rounded-lg text-content-tertiary hover:bg-surface-secondary hover:text-content-primary transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-6 py-4 space-y-4">
+              {/* Template download */}
+              <div className="flex items-center gap-2 rounded-lg bg-surface-secondary p-3">
+                <FileDown size={16} className="text-oe-blue shrink-0" />
+                <div className="flex-1">
+                  <p className="text-sm text-content-secondary">
+                    {t('tasks.import_template_hint', { defaultValue: 'Download the import template to see the expected format.' })}
+                  </p>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleDownloadTemplate}
+                >
+                  {t('tasks.download_template', { defaultValue: 'Template' })}
+                </Button>
+              </div>
+
+              {/* File drop area */}
+              <div
+                className="flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-8 transition-colors cursor-pointer border-border hover:border-oe-blue/50"
+                onClick={() => {
+                  const input = document.createElement('input');
+                  input.type = 'file';
+                  input.accept = '.xlsx,.csv,.xls';
+                  input.onchange = (e) => {
+                    const f = (e.target as HTMLInputElement).files?.[0];
+                    if (f) setImportFile(f);
+                  };
+                  input.click();
+                }}
+              >
+                <Upload size={24} className="text-content-tertiary mb-2" />
+                <p className="text-sm text-content-secondary text-center">
+                  {importFile
+                    ? importFile.name
+                    : t('tasks.drop_file', { defaultValue: 'Drop Excel or CSV file here, or click to browse' })}
+                </p>
+                <p className="text-xs text-content-quaternary mt-1">
+                  {t('tasks.import_columns_hint', { defaultValue: 'Columns: Title, Type, Status, Priority, Due Date, Description' })}
+                </p>
+              </div>
+
+              {importError && (
+                <div className="rounded-lg bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 p-3 text-sm text-semantic-error">
+                  {importError}
+                </div>
+              )}
+              {importResult && (
+                <div className="rounded-lg bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800 p-3 text-sm text-content-primary space-y-1">
+                  <p>
+                    {t('tasks.import_result', {
+                      defaultValue: 'Imported: {{imported}}, Skipped: {{skipped}}, Errors: {{errors}}',
+                      imported: importResult.imported,
+                      skipped: importResult.skipped,
+                      errors: importResult.errors.length,
+                    })}
+                  </p>
+                  {importResult.errors.length > 0 && (
+                    <details className="text-xs text-content-tertiary">
+                      <summary className="cursor-pointer">
+                        {t('tasks.show_errors', { defaultValue: 'Show error details' })}
+                      </summary>
+                      <ul className="mt-1 space-y-0.5 max-h-32 overflow-y-auto">
+                        {importResult.errors.slice(0, 20).map((err, i) => (
+                          <li key={i}>Row {err.row}: {err.error}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-border-light">
+              <Button variant="ghost" onClick={() => setShowImportModal(false)}>
+                {importResult
+                  ? t('common.close', { defaultValue: 'Close' })
+                  : t('common.cancel', { defaultValue: 'Cancel' })}
+              </Button>
+              {!importResult && (
+                <Button
+                  variant="primary"
+                  onClick={handleImportFile}
+                  disabled={!importFile || importPending}
+                >
+                  {importPending ? (
+                    <Loader2 size={16} className="animate-spin mr-1.5" />
+                  ) : (
+                    <Upload size={16} className="mr-1.5" />
+                  )}
+                  <span>{t('tasks.import_btn', { defaultValue: 'Import' })}</span>
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

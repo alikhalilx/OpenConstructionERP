@@ -13,6 +13,8 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   FileText,
+  Cloud,
+  Webhook,
 } from 'lucide-react';
 import { Button, Card, Badge, EmptyState, Breadcrumb, DateDisplay } from '@/shared/ui';
 import { apiGet } from '@/shared/lib/api';
@@ -416,6 +418,42 @@ function CorrespondenceRow({ item }: { item: Correspondence }) {
   );
 }
 
+/* ── Connector Card ───────────────────────────────────────────────────── */
+
+function ConnectorCard({
+  name,
+  status,
+  icon: Icon,
+  description,
+}: {
+  name: string;
+  status: 'available' | 'coming_soon';
+  icon: React.ElementType;
+  description: string;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-border-light bg-surface-primary p-3 transition-colors hover:border-border-medium">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <Icon size={16} className="shrink-0 text-content-tertiary" />
+          <span className="text-sm font-medium text-content-primary truncate">{name}</span>
+        </div>
+        <Badge
+          variant={status === 'available' ? 'success' : 'neutral'}
+          size="sm"
+          className="shrink-0"
+        >
+          {status === 'available'
+            ? t('correspondence.connector_available', { defaultValue: 'Available' })
+            : t('correspondence.connector_coming_soon', { defaultValue: 'Coming Soon' })}
+        </Badge>
+      </div>
+      <p className="text-xs text-content-tertiary leading-relaxed">{description}</p>
+    </div>
+  );
+}
+
 /* ── Main Page ─────────────────────────────────────────────────────────── */
 
 export function CorrespondencePage() {
@@ -574,6 +612,34 @@ export function CorrespondencePage() {
           {t('common.select_project_first', { defaultValue: 'Please select a project to continue.' })}
         </div>
       )}
+
+      {/* Connectors */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <ConnectorCard
+          name={t('correspondence.connector_email', { defaultValue: 'Email (IMAP/SMTP)' })}
+          status="available"
+          icon={Mail}
+          description={t('correspondence.connector_email_desc', { defaultValue: 'Auto-import incoming/outgoing project emails' })}
+        />
+        <ConnectorCard
+          name={t('correspondence.connector_m365', { defaultValue: 'Microsoft 365' })}
+          status="coming_soon"
+          icon={Cloud}
+          description={t('correspondence.connector_m365_desc', { defaultValue: 'Outlook emails & Teams messages' })}
+        />
+        <ConnectorCard
+          name={t('correspondence.connector_google', { defaultValue: 'Google Workspace' })}
+          status="coming_soon"
+          icon={Cloud}
+          description={t('correspondence.connector_google_desc', { defaultValue: 'Gmail & Google Chat' })}
+        />
+        <ConnectorCard
+          name={t('correspondence.connector_webhook', { defaultValue: 'API Webhook' })}
+          status="available"
+          icon={Webhook}
+          description={t('correspondence.connector_webhook_desc', { defaultValue: 'Receive correspondence via REST API' })}
+        />
+      </div>
 
       {/* Toolbar */}
       <div className="mb-6 flex flex-col sm:flex-row sm:items-center gap-3">
