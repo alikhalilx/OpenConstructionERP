@@ -105,10 +105,47 @@ export async function completeMeeting(id: string): Promise<Meeting> {
   return apiPost<Meeting>(`/v1/meetings/${id}/complete`);
 }
 
-export async function importMeetingSummary(
+/* -- Import Preview Types -------------------------------------------------- */
+
+export interface ImportPreviewAttendee {
+  name: string;
+  company: string;
+  role: string;
+}
+
+export interface ImportPreviewActionItem {
+  description: string;
+  owner: string;
+  due_date: string | null;
+}
+
+export interface ImportPreviewDecision {
+  decision: string;
+  made_by: string;
+}
+
+export interface ImportPreviewResponse {
+  title: string;
+  meeting_type: MeetingType;
+  source: string;
+  summary: string;
+  key_topics: string[];
+  attendees: ImportPreviewAttendee[];
+  action_items: ImportPreviewActionItem[];
+  decisions: ImportPreviewDecision[];
+  agenda_items: Array<{ topic: string; presenter: string | null; notes: string | null }>;
+  minutes: string;
+  ai_enhanced: boolean;
+  segments_parsed: number;
+}
+
+/* -- Import Functions ----------------------------------------------------- */
+
+async function _importSummaryRequest(
   projectId: string,
   file: File,
-): Promise<Meeting> {
+  preview: boolean,
+): Promise<Response> {
   const token = useAuthStore.getState().accessToken;
   const formData = new FormData();
   formData.append('file', file);
@@ -118,14 +155,15 @@ export async function importMeetingSummary(
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const response = await fetch(
-    `/api/v1/meetings/import-summary?project_id=${encodeURIComponent(projectId)}`,
-    {
-      method: 'POST',
-      headers,
-      body: formData,
-    },
-  );
+  const url =
+    `/api/v1/meetings/import-summary?project_id=${encodeURIComponent(projectId)}` +
+    (preview ? '&preview=true' : '');
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
 
   if (!response.ok) {
     let detail = 'Import failed';
@@ -138,5 +176,21 @@ export async function importMeetingSummary(
     throw new Error(detail);
   }
 
+  return response;
+}
+
+export async function importMeetingSummaryPreview(
+  projectId: string,
+  file: File,
+): Promise<ImportPreviewResponse> {
+  const response = await _importSummaryRequest(projectId, file, true);
+  return response.json();
+}
+
+export async function importMeetingSummary(
+  projectId: string,
+  file: File,
+): Promise<Meeting> {
+  const response = await _importSummaryRequest(projectId, file, false);
   return response.json();
 }

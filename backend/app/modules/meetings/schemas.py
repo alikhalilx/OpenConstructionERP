@@ -146,3 +146,50 @@ class OpenActionItemResponse(BaseModel):
     description: str
     owner_id: str | None = None
     due_date: str | None = None
+
+
+# ── Import Preview ──────────────────────────────────────────────────────
+
+
+class ImportPreviewAttendee(BaseModel):
+    """Attendee extracted from transcript for preview."""
+
+    name: str
+    company: str = ""
+    role: str = ""
+
+
+class ImportPreviewActionItem(BaseModel):
+    """Action item extracted from transcript for preview."""
+
+    description: str
+    owner: str = "TBD"
+    due_date: str | None = None
+
+
+class ImportPreviewDecision(BaseModel):
+    """Decision extracted from transcript for preview."""
+
+    decision: str
+    made_by: str = ""
+
+
+class ImportPreviewResponse(BaseModel):
+    """Preview of data extracted from a meeting transcript before creating the meeting.
+
+    Returned when the import-summary endpoint is called with preview=true.
+    Allows the user to review and edit extracted data before confirming creation.
+    """
+
+    title: str
+    meeting_type: str = "progress"
+    source: str = "other"
+    summary: str = ""
+    key_topics: list[str] = Field(default_factory=list)
+    attendees: list[ImportPreviewAttendee] = Field(default_factory=list)
+    action_items: list[ImportPreviewActionItem] = Field(default_factory=list)
+    decisions: list[ImportPreviewDecision] = Field(default_factory=list)
+    agenda_items: list[dict[str, Any]] = Field(default_factory=list)
+    minutes: str = ""
+    ai_enhanced: bool = False
+    segments_parsed: int = 0

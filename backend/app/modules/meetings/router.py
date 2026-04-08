@@ -25,6 +25,7 @@ from app.modules.meetings.schemas import (
     ActionItemEntry,
     AgendaItemEntry,
     AttendeeEntry,
+    ImportPreviewResponse,
     MeetingCreate,
     MeetingResponse,
     MeetingStatsResponse,
@@ -287,41 +288,140 @@ def _parse_plain_text(content: str) -> list[dict[str, str]]:
     return segments
 
 
+def _detect_source(filename: str, content: str) -> str:
+    """Detect the meeting platform source from filename and content.
+
+    Checks for known platform identifiers in the filename and in the first
+    500 characters of the transcript content.
+
+    Returns:
+        Platform identifier: 'teams', 'google_meet', 'zoom', 'webex', or 'other'.
+    """
+    fn = filename.lower()
+    ct = content[:500].lower()
+
+    if "teams" in fn or "teams" in ct or "microsoft teams" in ct:
+        return "teams"
+    if "meet" in fn or "google meet" in ct or "meet.google" in ct:
+        return "google_meet"
+    if "zoom" in fn or "zoom" in ct or "zoom.us" in ct:
+        return "zoom"
+    if "webex" in fn or "cisco webex" in ct or "webex" in ct:
+        return "webex"
+    return "other"
+
+
+def _infer_meeting_type(text: str) -> str:
+    """Infer the meeting type from transcript content.
+
+    Scans for domain-specific keywords to categorize the meeting.
+
+    Returns:
+        Meeting type: 'safety', 'design', 'subcontractor', 'kickoff', 'closeout',
+        or 'progress' as default.
+    """
+    lower = text[:5000].lower()
+    safety_kw = [
+        "safety", "incident", "hazard", "ppe", "osha", "near miss",
+        "risk assessment", "toolbox talk", "jsa", "job safety",
+    ]
+    design_kw = [
+        "design review", "architectural", "structural", "mep",
+        "schematic", "drawing", "specification", "detail",
+    ]
+    subcontractor_kw = [
+        "subcontractor", "sub-contractor", "trade", "bid",
+        "quote", "scope of work", "sow",
+    ]
+    kickoff_kw = ["kickoff", "kick-off", "project start", "mobilization"]
+    closeout_kw = ["closeout", "close-out", "handover", "deficiency", "punchlist", "punch list"]
+
+    if any(kw in lower for kw in safety_kw):
+        return "safety"
+    if any(kw in lower for kw in design_kw):
+        return "design"
+    if any(kw in lower for kw in subcontractor_kw):
+        return "subcontractor"
+    if any(kw in lower for kw in kickoff_kw):
+        return "kickoff"
+    if any(kw in lower for kw in closeout_kw):
+        return "closeout"
+    return "progress"
+
+
+# Expanded keyword patterns for heuristic extraction
+
+_ACTION_KEYWORDS = re.compile(
+    r"\b("
+    r"action\s*item|action\s*:?|todo\s*:?|to-do|task\s*:?|"
+    r"will\s+do|need\s+to|needs\s+to|should|must|"
+    r"deadline\s*:?|assigned\s+to|responsible\s*:?|"
+    r"follow\s*-?\s*up|by\s+(monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday|next\s+week|end\s+of\s+week|end\s+of\s+month|eow|eod|eom)|"
+    r"please\s+\w+|make\s+sure|ensure\s+that|"
+    r"i\s+will|we\s+will|let'?s\s+\w+|"
+    r"can\s+you|could\s+you"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_DECISION_KEYWORDS = re.compile(
+    r"\b("
+    r"decided|agreed|approved|confirmed|let'?s\s+go\s+with|"
+    r"final\s+decision|conclusion\s*:?|resolution\s*:?|verdict\s*:?|"
+    r"we\s+chose|the\s+plan\s+is|going\s+forward|"
+    r"resolved|consensus|sign\s*-?\s*off|signed\s+off|"
+    r"green\s*-?\s*light|go\s+ahead|proceed\s+with"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_TOPIC_KEYWORDS = re.compile(
+    r"\b(agenda|topic|item\s+\d|point\s+\d|discuss|discussion|update\s+on|report\s+on)\b",
+    re.IGNORECASE,
+)
+
+_DUE_DATE_PATTERN = re.compile(
+    r"\b(?:by|due|before|until)\s+"
+    r"(\d{4}-\d{2}-\d{2}|"
+    r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+    r"(?:next\s+(?:week|month))|"
+    r"(?:end\s+of\s+(?:week|month|day))|"
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{1,2})"
+    r"\b",
+    re.IGNORECASE,
+)
+
+
 def _extract_meeting_data_heuristic(
     segments: list[dict[str, str]],
     filename: str,
+    raw_text: str = "",
 ) -> dict:
     """Extract meeting structure from transcript segments using heuristics.
 
     Identifies:
     - Attendees from speaker tags
-    - Action items from keywords (action, todo, will do, deadline, by Friday)
-    - Key decisions from keywords (decided, agreed, approved, confirmed)
+    - Action items from keywords (expanded set including 'please', 'need to', 'let's')
+    - Key decisions from keywords (expanded set including 'go ahead', 'sign off')
     - Meeting title from filename or first meaningful line
+    - Meeting type from content keywords
+    - Source platform from filename and content
+
+    Args:
+        segments: Parsed transcript segments with speaker, text, timestamp.
+        filename: Original filename for title derivation and source detection.
+        raw_text: Full raw text content for source detection.
 
     Returns:
-        Dict with title, attendees, agenda_items, action_items, and minutes.
+        Dict with title, meeting_type, attendees, agenda_items, action_items,
+        minutes, source, decisions, key_topics, and segments_count.
     """
     attendees: dict[str, str] = {}  # name -> role
     action_items: list[dict] = []
-    decisions: list[str] = []
+    decisions: list[dict] = []
     discussion_topics: list[str] = []
     all_text_parts: list[str] = []
-
-    action_keywords = re.compile(
-        r"\b(action\s*item|todo|to-do|will\s+do|deadline|assigned\s+to|"
-        r"responsible|follow\s*up|by\s+(monday|tuesday|wednesday|thursday|friday|"
-        r"saturday|sunday|next\s+week|end\s+of\s+week|eow|eod))\b",
-        re.IGNORECASE,
-    )
-    decision_keywords = re.compile(
-        r"\b(decided|agreed|approved|confirmed|resolved|conclusion|decision)\b",
-        re.IGNORECASE,
-    )
-    topic_keywords = re.compile(
-        r"\b(agenda|topic|item\s+\d|point\s+\d|discuss|discussion)\b",
-        re.IGNORECASE,
-    )
 
     for seg in segments:
         speaker = seg.get("speaker", "").strip()
@@ -334,24 +434,27 @@ def _extract_meeting_data_heuristic(
             all_text_parts.append(text)
 
         # Check for action items
-        if action_keywords.search(text):
+        if _ACTION_KEYWORDS.search(text):
             owner = speaker or "TBD"
+            # Try to extract a due date reference
+            due_match = _DUE_DATE_PATTERN.search(text)
+            due_hint = due_match.group(1) if due_match else None
             action_items.append(
                 {
                     "description": text[:500],
                     "owner_id": None,
                     "owner_name": owner,
-                    "due_date": None,
+                    "due_date": due_hint,
                     "status": "open",
                 }
             )
 
         # Check for decisions
-        if decision_keywords.search(text):
-            decisions.append(text[:500])
+        if _DECISION_KEYWORDS.search(text):
+            decisions.append({"decision": text[:500], "made_by": speaker or ""})
 
         # Check for agenda/topic mentions
-        if topic_keywords.search(text):
+        if _TOPIC_KEYWORDS.search(text):
             discussion_topics.append(text[:300])
 
     # Derive title from filename
@@ -365,12 +468,12 @@ def _extract_meeting_data_heuristic(
     minutes_text = "\n".join(all_text_parts[:200])  # Cap at ~200 lines
     if decisions:
         minutes_text += "\n\n--- Key Decisions ---\n" + "\n".join(
-            f"- {d}" for d in decisions[:20]
+            f"- {d['decision']}" for d in decisions[:20]
         )
 
     # Build attendee list
     attendee_list = [
-        {"name": name, "company": "", "status": "present"}
+        {"name": name, "company": "", "role": "", "status": "present"}
         for name in attendees
     ]
 
@@ -380,24 +483,31 @@ def _extract_meeting_data_heuristic(
         for topic in discussion_topics[:20]
     ]
 
-    # Detect source platform from content hints
-    source = "other"
-    full_text_lower = " ".join(all_text_parts[:50]).lower()
-    if "teams" in full_text_lower or "microsoft teams" in filename.lower():
-        source = "teams"
-    elif "google meet" in full_text_lower or "meet" in filename.lower():
-        source = "google_meet"
-    elif "zoom" in full_text_lower or "zoom" in filename.lower():
-        source = "zoom"
+    # Detect source platform and meeting type
+    full_text = raw_text or " ".join(all_text_parts[:100])
+    source = _detect_source(filename, full_text)
+    meeting_type = _infer_meeting_type(full_text)
+
+    # Extract key topics (unique discussion topics, deduped)
+    key_topics: list[str] = []
+    seen_topics: set[str] = set()
+    for topic in discussion_topics[:20]:
+        short = topic[:100].strip()
+        low = short.lower()
+        if low not in seen_topics:
+            seen_topics.add(low)
+            key_topics.append(short)
 
     return {
         "title": title,
+        "meeting_type": meeting_type,
         "attendees": attendee_list,
         "agenda_items": agenda_list,
         "action_items": action_items,
         "minutes": minutes_text[:10000],
         "source": source,
         "decisions": decisions[:20],
+        "key_topics": key_topics[:15],
         "segments_count": len(segments),
     }
 
@@ -459,24 +569,242 @@ async def _extract_text_from_file(file_content: bytes, filename: str) -> str:
         return file_content.decode("latin-1", errors="replace")
 
 
-@router.post("/import-summary", response_model=MeetingResponse, status_code=201)
+_AI_MEETING_SYSTEM = (
+    "You are a construction project meeting transcript analyzer. "
+    "You extract structured meeting data from construction industry transcripts. "
+    "Return valid JSON only. Be precise and extract only what is explicitly stated."
+)
+
+_AI_MEETING_PROMPT = """Analyze this meeting transcript and extract structured data.
+
+TRANSCRIPT:
+{transcript_text}
+
+Extract the following in JSON format:
+{{
+  "title": "Meeting title (derive from main topic discussed)",
+  "meeting_type": "progress|design|safety|subcontractor|kickoff|closeout",
+  "key_topics": ["topic 1", "topic 2"],
+  "attendees": [
+    {{"name": "Person Name", "company": "Company if mentioned", "role": "Role if mentioned"}}
+  ],
+  "action_items": [
+    {{"description": "What needs to be done", "owner": "Person responsible", "due_date": "YYYY-MM-DD if mentioned, null otherwise"}}
+  ],
+  "decisions": [
+    {{"decision": "What was decided", "made_by": "Who decided"}}
+  ],
+  "summary": "2-3 sentence summary of the meeting",
+  "next_meeting": "Date/time if mentioned, null otherwise"
+}}
+
+Rules:
+- Extract ONLY what is explicitly stated in the transcript
+- For action items, identify keywords: "will do", "action", "deadline", "by Friday", "need to", "should"
+- For decisions: "decided", "agreed", "approved", "confirmed", "let's go with"
+- For attendees: look for speaker names before colons or in brackets
+- meeting_type: infer from content (safety topics = safety, budget/cost = progress, design/drawings = design, subcontractor/trade = subcontractor, etc.)
+- For construction meetings: look for RFIs, submittals, change orders, schedule updates, safety incidents, trade coordination
+"""  # noqa: E501
+
+
+async def _extract_with_ai(
+    session: object,
+    user_id: str,
+    text_content: str,
+    extracted: dict,
+) -> bool:
+    """Try to enhance extracted meeting data using AI.
+
+    Calls the configured AI provider to analyze the transcript and merges results
+    with the heuristic extraction (AI takes priority).
+
+    Args:
+        session: Database session for loading AI settings.
+        user_id: Current user ID for looking up their AI API keys.
+        text_content: Full transcript text (will be truncated for the AI prompt).
+        extracted: Mutable dict of heuristic-extracted data to merge AI results into.
+
+    Returns:
+        True if AI was successfully used, False otherwise.
+    """
+    try:
+        from sqlalchemy import select
+
+        from app.modules.ai.ai_client import call_ai, extract_json, resolve_provider_and_key
+        from app.modules.ai.models import AISettings
+
+        result = await session.execute(  # type: ignore[union-attr]
+            select(AISettings).where(AISettings.user_id == uuid.UUID(str(user_id)))
+        )
+        ai_settings = result.scalar_one_or_none()
+
+        if not ai_settings:
+            return False
+
+        provider, api_key = resolve_provider_and_key(ai_settings)
+
+        # Truncate transcript for AI prompt (leave room for the prompt template)
+        transcript_preview = text_content[:8000]
+        ai_prompt = _AI_MEETING_PROMPT.format(transcript_text=transcript_preview)
+
+        raw_response, _tokens = await call_ai(
+            provider=provider,
+            api_key=api_key,
+            system=_AI_MEETING_SYSTEM,
+            prompt=ai_prompt,
+            max_tokens=4096,
+        )
+
+        ai_data = extract_json(raw_response)
+        if not isinstance(ai_data, dict):
+            return False
+
+        # Merge AI results with heuristic results (AI takes priority)
+        if ai_data.get("title"):
+            extracted["title"] = ai_data["title"]
+        if ai_data.get("meeting_type") and ai_data["meeting_type"] in (
+            "progress", "design", "safety", "subcontractor", "kickoff", "closeout",
+        ):
+            extracted["meeting_type"] = ai_data["meeting_type"]
+        if ai_data.get("key_topics") and isinstance(ai_data["key_topics"], list):
+            extracted["key_topics"] = [
+                str(t)[:200] for t in ai_data["key_topics"][:15] if t
+            ]
+        if ai_data.get("attendees") and isinstance(ai_data["attendees"], list):
+            extracted["attendees"] = [
+                {
+                    "name": a.get("name", "Unknown"),
+                    "company": a.get("company", ""),
+                    "role": a.get("role", ""),
+                    "status": "present",
+                }
+                for a in ai_data["attendees"]
+                if isinstance(a, dict) and a.get("name")
+            ]
+        if ai_data.get("agenda_items") and isinstance(ai_data["agenda_items"], list):
+            extracted["agenda_items"] = [
+                {
+                    "topic": item.get("topic", ""),
+                    "presenter": item.get("presenter"),
+                    "notes": item.get("notes"),
+                }
+                for item in ai_data["agenda_items"]
+                if isinstance(item, dict) and item.get("topic")
+            ]
+        if ai_data.get("action_items") and isinstance(ai_data["action_items"], list):
+            extracted["action_items"] = [
+                {
+                    "description": item.get("description", ""),
+                    "owner_id": None,
+                    "owner_name": item.get("owner", item.get("owner_name", "TBD")),
+                    "due_date": item.get("due_date"),
+                    "status": item.get("status", "open"),
+                }
+                for item in ai_data["action_items"]
+                if isinstance(item, dict) and item.get("description")
+            ]
+        if ai_data.get("summary"):
+            extracted["minutes"] = str(ai_data["summary"])[:10000]
+        if ai_data.get("decisions") and isinstance(ai_data["decisions"], list):
+            extracted["decisions"] = [
+                (
+                    {"decision": d.get("decision", str(d)), "made_by": d.get("made_by", "")}
+                    if isinstance(d, dict)
+                    else {"decision": str(d), "made_by": ""}
+                )
+                for d in ai_data["decisions"][:20]
+            ]
+
+        return True
+
+    except Exception as exc:
+        # AI is optional — log and continue with heuristic results
+        logger.debug("AI-enhanced transcript parsing skipped: %s", exc)
+        return False
+
+
+def _build_preview_response(extracted: dict, ai_used: bool) -> ImportPreviewResponse:
+    """Build an ImportPreviewResponse from the extracted data dict.
+
+    Args:
+        extracted: Dict of extracted meeting data (from heuristics and/or AI).
+        ai_used: Whether AI enhancement was applied.
+
+    Returns:
+        ImportPreviewResponse with all extracted fields mapped.
+    """
+    from app.modules.meetings.schemas import (
+        ImportPreviewActionItem,
+        ImportPreviewAttendee,
+        ImportPreviewDecision,
+    )
+
+    attendees = [
+        ImportPreviewAttendee(
+            name=a.get("name", "Unknown"),
+            company=a.get("company", ""),
+            role=a.get("role", ""),
+        )
+        for a in extracted.get("attendees", [])
+    ]
+
+    action_items = [
+        ImportPreviewActionItem(
+            description=a.get("description", ""),
+            owner=a.get("owner_name", a.get("owner", "TBD")),
+            due_date=a.get("due_date"),
+        )
+        for a in extracted.get("action_items", [])
+        if a.get("description")
+    ]
+
+    raw_decisions = extracted.get("decisions", [])
+    decisions = [
+        ImportPreviewDecision(
+            decision=d.get("decision", str(d)) if isinstance(d, dict) else str(d),
+            made_by=d.get("made_by", "") if isinstance(d, dict) else "",
+        )
+        for d in raw_decisions
+    ]
+
+    return ImportPreviewResponse(
+        title=extracted.get("title", "Imported Meeting"),
+        meeting_type=extracted.get("meeting_type", "progress"),
+        source=extracted.get("source", "other"),
+        summary=extracted.get("minutes", "")[:2000],
+        key_topics=extracted.get("key_topics", []),
+        attendees=attendees,
+        action_items=action_items,
+        decisions=decisions,
+        agenda_items=extracted.get("agenda_items", []),
+        minutes=extracted.get("minutes", ""),
+        ai_enhanced=ai_used,
+        segments_parsed=extracted.get("segments_count", 0),
+    )
+
+
+@router.post("/import-summary")
 async def import_meeting_summary(
     project_id: uuid.UUID = Query(...),
     file: UploadFile = File(...),
+    preview: bool = Query(default=False),
     user_id: CurrentUserId = None,  # type: ignore[assignment]
     _perm: None = Depends(RequirePermission("meetings.create")),
     service: MeetingService = Depends(_get_service),
-) -> MeetingResponse:
+) -> MeetingResponse | ImportPreviewResponse:
     """Import a meeting summary from a transcript file.
 
     Accepts: .txt, .vtt, .srt, .docx, .pdf files (transcripts/notes).
 
-    AI-free heuristic parsing extracts:
-    - Meeting title (from filename)
-    - Attendees list (from speaker tags)
-    - Discussion topics
-    - Action items with owners
-    - Key decisions
+    Uses heuristic parsing to extract attendees, action items, decisions,
+    and topics. When AI API keys are configured, the transcript is also
+    sent to an LLM for higher-quality structured extraction.
+
+    Query Parameters:
+        preview: If true, returns extracted data without creating the meeting.
+            The caller can then present the data for user review and call
+            this endpoint again with preview=false to create the meeting.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="Filename is required")
@@ -521,92 +849,14 @@ async def import_meeting_summary(
         )
 
     # Extract meeting data using heuristics
-    extracted = _extract_meeting_data_heuristic(segments, file.filename)
+    extracted = _extract_meeting_data_heuristic(segments, file.filename, text_content)
 
     # Try AI-enhanced parsing if available
-    ai_used = False
-    try:
-        from sqlalchemy import select
+    ai_used = await _extract_with_ai(service.session, str(user_id), text_content, extracted)
 
-        from app.modules.ai.ai_client import call_ai, extract_json, resolve_provider_and_key
-        from app.modules.ai.models import AISettings
-
-        result = await service.session.execute(
-            select(AISettings).where(AISettings.user_id == uuid.UUID(str(user_id)))
-        )
-        ai_settings = result.scalar_one_or_none()
-
-        if ai_settings:
-            provider, api_key = resolve_provider_and_key(ai_settings)
-
-            # Truncate transcript for AI prompt
-            transcript_preview = text_content[:8000]
-            ai_prompt = (
-                "Analyze this meeting transcript and extract structured data.\n"
-                "Return a JSON object with these fields:\n"
-                '- "title": string (meeting title)\n'
-                '- "attendees": [{name, company, role}]\n'
-                '- "agenda_items": [{topic, presenter, notes}]\n'
-                '- "action_items": [{description, owner_name, due_date, status}]\n'
-                '- "decisions": [string]\n'
-                '- "summary": string (brief meeting summary)\n\n'
-                f"Transcript:\n{transcript_preview}"
-            )
-
-            raw_response, _tokens = await call_ai(
-                provider=provider,
-                api_key=api_key,
-                system="You are a meeting transcript analyzer. Extract structured meeting data from transcripts. Return valid JSON only.",
-                prompt=ai_prompt,
-                max_tokens=4096,
-            )
-
-            ai_data = extract_json(raw_response)
-            if isinstance(ai_data, dict):
-                ai_used = True
-                # Merge AI results with heuristic results (AI takes priority)
-                if ai_data.get("title"):
-                    extracted["title"] = ai_data["title"]
-                if ai_data.get("attendees") and isinstance(ai_data["attendees"], list):
-                    extracted["attendees"] = [
-                        {
-                            "name": a.get("name", "Unknown"),
-                            "company": a.get("company", a.get("role", "")),
-                            "status": "present",
-                        }
-                        for a in ai_data["attendees"]
-                        if isinstance(a, dict) and a.get("name")
-                    ]
-                if ai_data.get("agenda_items") and isinstance(ai_data["agenda_items"], list):
-                    extracted["agenda_items"] = [
-                        {
-                            "topic": item.get("topic", ""),
-                            "presenter": item.get("presenter"),
-                            "notes": item.get("notes"),
-                        }
-                        for item in ai_data["agenda_items"]
-                        if isinstance(item, dict) and item.get("topic")
-                    ]
-                if ai_data.get("action_items") and isinstance(ai_data["action_items"], list):
-                    extracted["action_items"] = [
-                        {
-                            "description": item.get("description", ""),
-                            "owner_id": None,
-                            "owner_name": item.get("owner_name", item.get("owner", "TBD")),
-                            "due_date": item.get("due_date"),
-                            "status": item.get("status", "open"),
-                        }
-                        for item in ai_data["action_items"]
-                        if isinstance(item, dict) and item.get("description")
-                    ]
-                if ai_data.get("summary"):
-                    extracted["minutes"] = str(ai_data["summary"])[:10000]
-                if ai_data.get("decisions") and isinstance(ai_data["decisions"], list):
-                    extracted["decisions"] = ai_data["decisions"][:20]
-
-    except Exception as exc:
-        # AI is optional — log and continue with heuristic results
-        logger.debug("AI-enhanced transcript parsing skipped: %s", exc)
+    # If preview mode, return extracted data without creating the meeting
+    if preview:
+        return _build_preview_response(extracted, ai_used)
 
     # Create meeting from extracted data
     today = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -641,9 +891,13 @@ async def import_meeting_summary(
         if item.get("description")
     ]
 
+    meeting_type = extracted.get("meeting_type", "progress")
+    if meeting_type not in ("progress", "design", "safety", "subcontractor", "kickoff", "closeout"):
+        meeting_type = "progress"
+
     meeting_create = MeetingCreate(
         project_id=project_id,
-        meeting_type="progress",
+        meeting_type=meeting_type,
         title=extracted.get("title", "Imported Meeting"),
         meeting_date=today,
         location=None,
@@ -682,6 +936,7 @@ async def import_meeting_summary(
             "ai_enhanced": ai_used,
             "segments_parsed": extracted.get("segments_count", 0),
             "decisions": extracted.get("decisions", []),
+            "key_topics": extracted.get("key_topics", []),
         },
     )
 

@@ -20,6 +20,11 @@ import {
   Loader2,
   Upload,
   ListChecks,
+  Edit3,
+  Trash2,
+  ArrowLeft,
+  Sparkles,
+  AlertCircle,
 } from 'lucide-react';
 import { Button, Card, Badge, EmptyState, Breadcrumb, ConfirmDialog, SkeletonTable } from '@/shared/ui';
 import { useConfirm } from '@/shared/hooks/useConfirm';
@@ -33,11 +38,15 @@ import {
   createMeeting,
   completeMeeting,
   importMeetingSummary,
+  importMeetingSummaryPreview,
   type Meeting,
   type MeetingType,
   type MeetingStatus,
   type CreateMeetingPayload,
   type AttendeeStatus,
+  type ImportPreviewResponse,
+  type ImportPreviewAttendee,
+  type ImportPreviewActionItem,
 } from './api';
 
 /* -- Constants ------------------------------------------------------------- */
@@ -308,18 +317,56 @@ function CreateMeetingModal({
 
 const ACCEPTED_TRANSCRIPT_FORMATS = '.txt,.vtt,.srt,.docx,.pdf';
 
+const SOURCE_LABELS: Record<string, { label: string; cls: string }> = {
+  teams: {
+    label: 'Microsoft Teams',
+    cls: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
+  },
+  google_meet: {
+    label: 'Google Meet',
+    cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
+  },
+  zoom: {
+    label: 'Zoom',
+    cls: 'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400',
+  },
+  webex: {
+    label: 'Cisco Webex',
+    cls: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
+  },
+  other: {
+    label: 'Other',
+    cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
+  },
+};
+
+type ImportStep = 'upload' | 'processing' | 'preview';
+
 function ImportSummaryModal({
   onClose,
   onImport,
   isPending,
+  projectId,
 }: {
   onClose: () => void;
   onImport: (file: File) => void;
   isPending: boolean;
+  projectId: string;
 }) {
   const { t } = useTranslation();
+  const addToast = useToastStore((s) => s.addToast);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [step, setStep] = useState<ImportStep>('upload');
+  const [processingStage, setProcessingStage] = useState('');
+  const [previewData, setPreviewData] = useState<ImportPreviewResponse | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  // Editable preview state
+  const [editTitle, setEditTitle] = useState('');
+  const [editMeetingType, setEditMeetingType] = useState<MeetingType>('progress');
+  const [editAttendees, setEditAttendees] = useState<(ImportPreviewAttendee & { included: boolean })[]>([]);
+  const [editActionItems, setEditActionItems] = useState<(ImportPreviewActionItem & { included: boolean })[]>([]);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -338,11 +385,64 @@ function ImportSummaryModal({
 
   const detectSource = (filename: string): string => {
     const lower = filename.toLowerCase();
-    if (lower.includes('teams') || lower.includes('microsoft')) return 'Teams';
-    if (lower.includes('meet') || lower.includes('google')) return 'Google Meet';
-    if (lower.includes('zoom')) return 'Zoom';
-    return 'Other';
+    if (lower.includes('teams') || lower.includes('microsoft')) return 'teams';
+    if (lower.includes('meet') || lower.includes('google')) return 'google_meet';
+    if (lower.includes('zoom')) return 'zoom';
+    if (lower.includes('webex') || lower.includes('cisco')) return 'webex';
+    return 'other';
   };
+
+  // Preview extraction
+  const handleExtractPreview = useCallback(async () => {
+    if (!selectedFile || !projectId) return;
+    setStep('processing');
+    setPreviewError(null);
+    setProcessingStage(t('meetings.stage_parsing', { defaultValue: 'Parsing transcript...' }));
+    try {
+      // Short delay to show the "Parsing" stage visually
+      await new Promise((r) => setTimeout(r, 300));
+      setProcessingStage(t('meetings.stage_extracting', { defaultValue: 'Extracting with AI...' }));
+      const data = await importMeetingSummaryPreview(projectId, selectedFile);
+      setPreviewData(data);
+      setEditTitle(data.title);
+      setEditMeetingType(data.meeting_type as MeetingType);
+      setEditAttendees(
+        data.attendees.map((a) => ({ ...a, included: true })),
+      );
+      setEditActionItems(
+        data.action_items.map((a) => ({ ...a, included: true })),
+      );
+      setProcessingStage(t('meetings.stage_done', { defaultValue: 'Done' }));
+      setStep('preview');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Preview extraction failed';
+      setPreviewError(msg);
+      setStep('upload');
+      addToast({ type: 'error', title: t('common.error', { defaultValue: 'Error' }), message: msg });
+    }
+  }, [selectedFile, projectId, t, addToast]);
+
+  const handleBackToUpload = useCallback(() => {
+    setStep('upload');
+    setPreviewData(null);
+    setPreviewError(null);
+  }, []);
+
+  const handleRemoveActionItem = useCallback((idx: number) => {
+    setEditActionItems((prev) => prev.filter((_, i) => i !== idx));
+  }, []);
+
+  const handleToggleAttendee = useCallback((idx: number) => {
+    setEditAttendees((prev) =>
+      prev.map((a, i) => (i === idx ? { ...a, included: !a.included } : a)),
+    );
+  }, []);
+
+  const handleToggleActionItem = useCallback((idx: number) => {
+    setEditActionItems((prev) =>
+      prev.map((a, i) => (i === idx ? { ...a, included: !a.included } : a)),
+    );
+  }, []);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -352,14 +452,30 @@ function ImportSummaryModal({
     return () => document.removeEventListener('keydown', handler);
   }, [onClose]);
 
+  const detectedSource = selectedFile ? detectSource(selectedFile.name) : null;
+  const sourceCfg = detectedSource ? SOURCE_LABELS[detectedSource] || SOURCE_LABELS.other : null;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
-      <div className="w-full max-w-lg bg-surface-elevated rounded-xl shadow-xl border border-border animate-card-in mx-4 max-h-[90vh] overflow-y-auto" role="dialog" aria-label={t('meetings.import_summary', { defaultValue: 'Import Meeting Summary' })}>
+      <div className="w-full max-w-2xl bg-surface-elevated rounded-xl shadow-xl border border-border animate-card-in mx-4 max-h-[90vh] overflow-y-auto" role="dialog" aria-label={t('meetings.import_summary', { defaultValue: 'Import Meeting Summary' })}>
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-border-light">
-          <h2 className="text-lg font-semibold text-content-primary">
-            {t('meetings.import_summary', { defaultValue: 'Import Meeting Summary' })}
-          </h2>
+          <div className="flex items-center gap-3">
+            {step === 'preview' && (
+              <button
+                onClick={handleBackToUpload}
+                className="flex h-8 w-8 items-center justify-center rounded-lg text-content-tertiary hover:bg-surface-secondary hover:text-content-primary transition-colors"
+                aria-label={t('common.back', { defaultValue: 'Back' })}
+              >
+                <ArrowLeft size={18} />
+              </button>
+            )}
+            <h2 className="text-lg font-semibold text-content-primary">
+              {step === 'preview'
+                ? t('meetings.review_import', { defaultValue: 'Review Extracted Data' })
+                : t('meetings.import_summary', { defaultValue: 'Import Meeting Summary' })}
+            </h2>
+          </div>
           <button
             onClick={onClose}
             aria-label={t('common.close', { defaultValue: 'Close' })}
@@ -369,107 +485,402 @@ function ImportSummaryModal({
           </button>
         </div>
 
-        {/* Content */}
-        <div className="px-6 py-4 space-y-4">
-          <p className="text-sm text-content-secondary">
-            {t('meetings.import_description', {
-              defaultValue:
-                'Upload a meeting transcript from Microsoft Teams, Google Meet, Zoom, or any other source. AI will extract attendees, agenda, action items, and decisions.',
-            })}
-          </p>
+        {/* Step: Upload */}
+        {step === 'upload' && (
+          <>
+            <div className="px-6 py-4 space-y-4">
+              <p className="text-sm text-content-secondary">
+                {t('meetings.import_description', {
+                  defaultValue:
+                    'Upload a meeting transcript from Microsoft Teams, Google Meet, Zoom, or any other source. AI will extract attendees, agenda, action items, and decisions.',
+                })}
+              </p>
 
-          {/* Drop zone */}
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragOver(true);
-            }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={handleDrop}
-            className={clsx(
-              'border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer',
-              dragOver
-                ? 'border-oe-blue bg-oe-blue-subtle'
-                : selectedFile
-                  ? 'border-semantic-success bg-green-50 dark:bg-green-950/20'
-                  : 'border-border-light hover:border-oe-blue hover:bg-surface-secondary',
-            )}
-            onClick={() => document.getElementById('transcript-file-input')?.click()}
-          >
-            <input
-              id="transcript-file-input"
-              type="file"
-              accept={ACCEPTED_TRANSCRIPT_FORMATS}
-              className="hidden"
-              onChange={handleFileSelect}
-            />
+              {/* Drop zone */}
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOver(true);
+                }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
+                className={clsx(
+                  'border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer',
+                  dragOver
+                    ? 'border-oe-blue bg-oe-blue-subtle'
+                    : selectedFile
+                      ? 'border-semantic-success bg-green-50 dark:bg-green-950/20'
+                      : 'border-border-light hover:border-oe-blue hover:bg-surface-secondary',
+                )}
+                onClick={() => document.getElementById('transcript-file-input')?.click()}
+              >
+                <input
+                  id="transcript-file-input"
+                  type="file"
+                  accept={ACCEPTED_TRANSCRIPT_FORMATS}
+                  className="hidden"
+                  onChange={handleFileSelect}
+                />
 
-            {selectedFile ? (
-              <div className="space-y-2">
-                <CheckCircle2 size={32} className="mx-auto text-semantic-success" />
-                <p className="text-sm font-medium text-content-primary">{selectedFile.name}</p>
-                <p className="text-xs text-content-tertiary">
-                  {(selectedFile.size / 1024).toFixed(1)} KB
-                </p>
-                <Badge variant="blue" size="sm">
-                  {detectSource(selectedFile.name)}
-                </Badge>
+                {selectedFile ? (
+                  <div className="space-y-2">
+                    <CheckCircle2 size={32} className="mx-auto text-semantic-success" />
+                    <p className="text-sm font-medium text-content-primary">{selectedFile.name}</p>
+                    <p className="text-xs text-content-tertiary">
+                      {(selectedFile.size / 1024).toFixed(1)} KB
+                    </p>
+                    {sourceCfg && (
+                      <Badge variant="neutral" size="sm" className={sourceCfg.cls}>
+                        {t('meetings.detected_source', { defaultValue: 'Detected: {{source}}', source: sourceCfg.label })}
+                      </Badge>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <Upload size={32} className="mx-auto text-content-tertiary" />
+                    <p className="text-sm font-medium text-content-secondary">
+                      {t('meetings.drop_transcript', {
+                        defaultValue: 'Drop transcript file here or click to browse',
+                      })}
+                    </p>
+                    <p className="text-xs text-content-tertiary">
+                      {t('meetings.accepted_formats', {
+                        defaultValue: 'Accepted formats: .txt, .vtt, .srt, .docx, .pdf',
+                      })}
+                    </p>
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="space-y-2">
-                <Upload size={32} className="mx-auto text-content-tertiary" />
-                <p className="text-sm font-medium text-content-secondary">
-                  {t('meetings.drop_transcript', {
-                    defaultValue: 'Drop transcript file here or click to browse',
-                  })}
-                </p>
-                <p className="text-xs text-content-tertiary">
-                  {t('meetings.accepted_formats', {
-                    defaultValue: 'Accepted formats: .txt, .vtt, .srt, .docx, .pdf',
-                  })}
-                </p>
-              </div>
-            )}
-          </div>
 
-          {/* Format hints */}
-          <div className="rounded-lg bg-surface-secondary p-3">
-            <p className="text-xs text-content-tertiary font-medium uppercase tracking-wide mb-2">
-              {t('meetings.supported_sources', { defaultValue: 'Supported Sources' })}
-            </p>
-            <div className="flex flex-wrap gap-2">
+              {/* Error display */}
+              {previewError && (
+                <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 dark:border-red-800 dark:bg-red-950/30 p-3">
+                  <AlertCircle size={16} className="text-semantic-error mt-0.5 shrink-0" />
+                  <p className="text-sm text-semantic-error">{previewError}</p>
+                </div>
+              )}
+
+              {/* Format hints */}
+              <div className="rounded-lg bg-surface-secondary p-3">
+                <p className="text-xs text-content-tertiary font-medium uppercase tracking-wide mb-2">
+                  {t('meetings.supported_sources', { defaultValue: 'Supported Sources' })}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {Object.values(SOURCE_LABELS).map((s) => (
+                    <Badge key={s.label} variant="neutral" size="sm" className={s.cls}>
+                      {s.label}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-border-light">
+              <Button variant="ghost" onClick={onClose}>
+                {t('common.cancel', { defaultValue: 'Cancel' })}
+              </Button>
+              <Button
+                variant="primary"
+                onClick={handleExtractPreview}
+                disabled={!selectedFile}
+              >
+                <FileUp size={16} className="mr-1.5 shrink-0" />
+                <span>{t('meetings.extract_preview', { defaultValue: 'Extract & Preview' })}</span>
+              </Button>
+            </div>
+          </>
+        )}
+
+        {/* Step: Processing */}
+        {step === 'processing' && (
+          <div className="px-6 py-12 flex flex-col items-center gap-4">
+            <Loader2 size={40} className="animate-spin text-oe-blue" />
+            <div className="text-center space-y-1">
+              <p className="text-sm font-medium text-content-primary">{processingStage}</p>
+              <p className="text-xs text-content-tertiary">
+                {t('meetings.processing_hint', { defaultValue: 'This may take a few seconds...' })}
+              </p>
+            </div>
+            {/* Processing stages indicator */}
+            <div className="flex items-center gap-2 mt-2">
               {[
-                { label: 'Microsoft Teams', cls: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' },
-                { label: 'Google Meet', cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' },
-                { label: 'Zoom', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400' },
-                { label: 'Other', cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400' },
-              ].map((s) => (
-                <Badge key={s.label} variant="neutral" size="sm" className={s.cls}>
-                  {s.label}
-                </Badge>
-              ))}
+                t('meetings.stage_parsing', { defaultValue: 'Parsing' }),
+                t('meetings.stage_ai', { defaultValue: 'AI Extract' }),
+                t('meetings.stage_done', { defaultValue: 'Done' }),
+              ].map((label, idx) => {
+                const currentIdx = processingStage.toLowerCase().includes('parsing')
+                  ? 0
+                  : processingStage.toLowerCase().includes('extract') || processingStage.toLowerCase().includes('ai')
+                    ? 1
+                    : 2;
+                const isActive = idx <= currentIdx;
+                return (
+                  <React.Fragment key={label}>
+                    {idx > 0 && (
+                      <div className={clsx('h-0.5 w-6 rounded', isActive ? 'bg-oe-blue' : 'bg-border-light')} />
+                    )}
+                    <div className={clsx(
+                      'text-2xs px-2 py-0.5 rounded-full font-medium',
+                      isActive
+                        ? 'bg-oe-blue/10 text-oe-blue'
+                        : 'bg-surface-secondary text-content-tertiary',
+                    )}>
+                      {label}
+                    </div>
+                  </React.Fragment>
+                );
+              })}
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-border-light">
-          <Button variant="ghost" onClick={onClose} disabled={isPending}>
-            {t('common.cancel', { defaultValue: 'Cancel' })}
-          </Button>
-          <Button
-            variant="primary"
-            onClick={() => selectedFile && onImport(selectedFile)}
-            disabled={isPending || !selectedFile}
-          >
-            {isPending ? (
-              <Loader2 size={16} className="mr-1.5 animate-spin shrink-0" />
-            ) : (
-              <FileUp size={16} className="mr-1.5 shrink-0" />
-            )}
-            <span>{t('meetings.import_btn', { defaultValue: 'Import & Extract' })}</span>
-          </Button>
-        </div>
+        {/* Step: Preview */}
+        {step === 'preview' && previewData && (
+          <>
+            <div className="px-6 py-4 space-y-4 max-h-[60vh] overflow-y-auto">
+              {/* AI indicator */}
+              {previewData.ai_enhanced && (
+                <div className="flex items-center gap-2 rounded-lg bg-purple-50 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-800 px-3 py-2">
+                  <Sparkles size={14} className="text-purple-600 dark:text-purple-400" />
+                  <span className="text-xs font-medium text-purple-700 dark:text-purple-300">
+                    {t('meetings.ai_enhanced', { defaultValue: 'AI-enhanced extraction' })}
+                  </span>
+                </div>
+              )}
+
+              {/* Source badge */}
+              {previewData.source && SOURCE_LABELS[previewData.source] && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-content-tertiary">
+                    {t('meetings.label_source', { defaultValue: 'Source:' })}
+                  </span>
+                  <Badge
+                    variant="neutral"
+                    size="sm"
+                    className={SOURCE_LABELS[previewData.source]?.cls || ''}
+                  >
+                    {SOURCE_LABELS[previewData.source]?.label || previewData.source}
+                  </Badge>
+                  <span className="text-xs text-content-tertiary ml-auto">
+                    {t('meetings.segments_count', {
+                      defaultValue: '{{count}} segments parsed',
+                      count: previewData.segments_parsed,
+                    })}
+                  </span>
+                </div>
+              )}
+
+              {/* Title (editable) */}
+              <div>
+                <label className="block text-xs font-medium text-content-tertiary mb-1 uppercase tracking-wide">
+                  {t('meetings.field_title', { defaultValue: 'Title' })}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    className={inputCls}
+                  />
+                  <Edit3 size={14} className="text-content-tertiary shrink-0" />
+                </div>
+              </div>
+
+              {/* Meeting Type (editable) */}
+              <div>
+                <label className="block text-xs font-medium text-content-tertiary mb-1 uppercase tracking-wide">
+                  {t('meetings.field_type', { defaultValue: 'Meeting Type' })}
+                </label>
+                <div className="relative">
+                  <select
+                    value={editMeetingType}
+                    onChange={(e) => setEditMeetingType(e.target.value as MeetingType)}
+                    className={inputCls + ' appearance-none pr-9'}
+                  >
+                    {MEETING_TYPES.map((mt) => (
+                      <option key={mt} value={mt}>
+                        {t(`meetings.type_${mt}`, {
+                          defaultValue: mt.charAt(0).toUpperCase() + mt.slice(1),
+                        })}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2.5 text-content-tertiary">
+                    <ChevronDown size={14} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Key Topics */}
+              {previewData.key_topics.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-content-tertiary mb-1.5 uppercase tracking-wide">
+                    {t('meetings.label_topics', { defaultValue: 'Key Topics' })}
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {previewData.key_topics.map((topic, idx) => (
+                      <Badge key={idx} variant="blue" size="sm">
+                        {topic.length > 60 ? topic.slice(0, 60) + '...' : topic}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Attendees (checkboxes) */}
+              {editAttendees.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-content-tertiary mb-1.5 uppercase tracking-wide">
+                    {t('meetings.label_attendees', { defaultValue: 'Attendees' })}
+                    <span className="ml-1 text-content-tertiary font-normal">
+                      ({editAttendees.filter((a) => a.included).length}/{editAttendees.length})
+                    </span>
+                  </label>
+                  <div className="rounded-lg border border-border-light divide-y divide-border-light">
+                    {editAttendees.map((att, idx) => (
+                      <label
+                        key={idx}
+                        className="flex items-center gap-3 px-3 py-2 hover:bg-surface-secondary/50 cursor-pointer transition-colors"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={att.included}
+                          onChange={() => handleToggleAttendee(idx)}
+                          className="rounded border-border text-oe-blue focus:ring-oe-blue/30"
+                        />
+                        <span className={clsx('text-sm flex-1', !att.included && 'text-content-tertiary line-through')}>
+                          {att.name}
+                        </span>
+                        {att.company && (
+                          <span className="text-xs text-content-tertiary">{att.company}</span>
+                        )}
+                        {att.role && (
+                          <span className="text-xs text-content-tertiary">({att.role})</span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Action Items (editable, removable) */}
+              {editActionItems.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-content-tertiary mb-1.5 uppercase tracking-wide">
+                    {t('meetings.label_actions', { defaultValue: 'Action Items' })}
+                    <span className="ml-1 text-content-tertiary font-normal">
+                      ({editActionItems.filter((a) => a.included).length}/{editActionItems.length})
+                    </span>
+                  </label>
+                  <div className="rounded-lg border border-blue-200 dark:border-blue-800 divide-y divide-blue-100 dark:divide-blue-900">
+                    {editActionItems.map((ai, idx) => (
+                      <div
+                        key={idx}
+                        className={clsx(
+                          'flex items-start gap-3 px-3 py-2.5 transition-colors',
+                          !ai.included && 'opacity-50',
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={ai.included}
+                          onChange={() => handleToggleActionItem(idx)}
+                          className="rounded border-border text-oe-blue focus:ring-oe-blue/30 mt-0.5"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className={clsx('text-sm text-content-primary', !ai.included && 'line-through')}>
+                            {ai.description}
+                          </p>
+                          <div className="flex items-center gap-3 mt-0.5 text-xs text-content-tertiary">
+                            <span>
+                              {t('meetings.action_owner', { defaultValue: 'Owner' })}: {ai.owner}
+                            </span>
+                            {ai.due_date && (
+                              <span>
+                                {t('meetings.action_due', { defaultValue: 'Due' })}: {ai.due_date}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => handleRemoveActionItem(idx)}
+                          className="flex h-6 w-6 items-center justify-center rounded text-content-tertiary hover:text-semantic-error hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors shrink-0 mt-0.5"
+                          aria-label={t('common.remove', { defaultValue: 'Remove' })}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Decisions (read-only) */}
+              {previewData.decisions.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-content-tertiary mb-1.5 uppercase tracking-wide">
+                    {t('meetings.label_decisions', { defaultValue: 'Decisions' })}
+                  </label>
+                  <div className="rounded-lg bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800 p-3 space-y-1.5">
+                    {previewData.decisions.map((d, idx) => (
+                      <div key={idx} className="flex items-start gap-2 text-sm">
+                        <CheckCircle2 size={14} className="text-semantic-success mt-0.5 shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <span className="text-content-primary">{d.decision}</span>
+                          {d.made_by && (
+                            <span className="text-xs text-content-tertiary ml-2">
+                              ({d.made_by})
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Summary preview */}
+              {previewData.summary && (
+                <div>
+                  <label className="block text-xs font-medium text-content-tertiary mb-1 uppercase tracking-wide">
+                    {t('meetings.label_summary', { defaultValue: 'Summary' })}
+                  </label>
+                  <p className="text-sm text-content-secondary bg-surface-secondary rounded-lg p-3">
+                    {previewData.summary.length > 500
+                      ? previewData.summary.slice(0, 500) + '...'
+                      : previewData.summary}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-between gap-3 px-6 py-4 border-t border-border-light">
+              <p className="text-xs text-content-tertiary">
+                {t('meetings.review_hint', {
+                  defaultValue: 'Review the extracted data above before creating the meeting.',
+                })}
+              </p>
+              <div className="flex items-center gap-3 shrink-0">
+                <Button variant="ghost" onClick={onClose} disabled={isPending}>
+                  {t('common.cancel', { defaultValue: 'Cancel' })}
+                </Button>
+                <Button
+                  variant="primary"
+                  onClick={() => selectedFile && onImport(selectedFile)}
+                  disabled={isPending || !selectedFile}
+                >
+                  {isPending ? (
+                    <Loader2 size={16} className="mr-1.5 animate-spin shrink-0" />
+                  ) : (
+                    <Plus size={16} className="mr-1.5 shrink-0" />
+                  )}
+                  <span>{t('meetings.create_meeting', { defaultValue: 'Create Meeting' })}</span>
+                </Button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1196,6 +1607,7 @@ export function MeetingsPage() {
           onClose={() => setShowImportModal(false)}
           onImport={handleImport}
           isPending={importMut.isPending}
+          projectId={projectId}
         />
       )}
 
