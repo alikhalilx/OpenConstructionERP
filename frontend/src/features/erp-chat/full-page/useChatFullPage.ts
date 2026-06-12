@@ -8,6 +8,7 @@ import {
   fetchSessionMessages,
   deleteChatSession,
 } from '../api';
+import { isAiConfigured } from '../aiConfigured';
 import type { ChatMessage, ChatSession, DataPanelEntry, ToolCallInfo } from '../types';
 
 /** Shape of a persisted message row from GET /sessions/{id}/messages/. */
@@ -113,16 +114,7 @@ export function useChatFullPage(): UseChatFullPageReturn {
       .getSettings()
       .then((settings: AISettings) => {
         if (cancelled) return;
-        const hasKey =
-          settings.anthropic_api_key_set ||
-          settings.openai_api_key_set ||
-          settings.gemini_api_key_set ||
-          settings.openrouter_api_key_set ||
-          settings.mistral_api_key_set ||
-          settings.groq_api_key_set ||
-          settings.deepseek_api_key_set ||
-          settings.cohere_api_key_set;
-        setAiConfigured(hasKey);
+        setAiConfigured(isAiConfigured(settings));
       })
       .catch(() => {
         if (!cancelled) setAiConfigured(false);

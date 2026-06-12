@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { Settings } from 'lucide-react';
 import { aiApi, type AISettings } from '@/features/ai/api';
+import { isAiConfigured } from '../aiConfigured';
 
 /**
  * Banner shown above the chat panel when the user has not configured an
@@ -34,19 +35,7 @@ export default function AIConfigBanner() {
 
   if (loading) return null;
 
-  // Determine if any provider has a key set
-  const hasKey =
-    !!settings &&
-    (settings.anthropic_api_key_set ||
-      settings.openai_api_key_set ||
-      settings.gemini_api_key_set ||
-      settings.openrouter_api_key_set ||
-      settings.mistral_api_key_set ||
-      settings.groq_api_key_set ||
-      settings.deepseek_api_key_set ||
-      settings.cohere_api_key_set);
-
-  if (hasKey) return null;
+  if (isAiConfigured(settings)) return null;
 
   return (
     <div
