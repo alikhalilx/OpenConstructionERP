@@ -43,6 +43,7 @@ import { useFocusTrap } from '@/shared/hooks/useFocusTrap';
 import { uuid } from '@/shared/lib/browser';
 import { useFloatingChatStore, useIsMobileViewport } from './useFloatingChat';
 import { fetchChatSessions } from './api';
+import { isAiConfigured } from './aiConfigured';
 import type { ChatMessage, ChatSession, ToolCallInfo } from './types';
 
 // Reuse the full-page renderer registry so the tool-result cards inside the
@@ -1029,16 +1030,7 @@ export function FloatingChatPanel() {
       .getSettings()
       .then((settings: AISettings) => {
         if (cancelled) return;
-        const hasKey =
-          settings.anthropic_api_key_set ||
-          settings.openai_api_key_set ||
-          settings.gemini_api_key_set ||
-          settings.openrouter_api_key_set ||
-          settings.mistral_api_key_set ||
-          settings.groq_api_key_set ||
-          settings.deepseek_api_key_set ||
-          settings.cohere_api_key_set;
-        setAiConfigured(hasKey);
+        setAiConfigured(isAiConfigured(settings));
       })
       .catch(() => {
         if (!cancelled) setAiConfigured(false);
