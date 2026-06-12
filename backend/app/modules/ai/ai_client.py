@@ -542,10 +542,9 @@ async def call_openai_compatible(
         msg = f"Unknown OpenAI-compatible provider: {provider}"
         raise ValueError(msg)
 
-    headers: dict[str, str] = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
     if "extra_headers" in config:
         headers.update(config["extra_headers"])
 
@@ -933,6 +932,10 @@ def resolve_provider_and_key(
         (["gemini", "google"], "gemini", "gemini_api_key"),
         (["openrouter", "router"], "openrouter", "openrouter_api_key"),
         (["mistral"], "mistral", "mistral_api_key"),
+        # Self-hosted provider names must be checked before the generic
+        # "llama" keyword; otherwise "ollama" is accidentally routed to Groq.
+        (["ollama"], "ollama", None),
+        (["vllm"], "vllm", None),
         (["groq", "llama"], "groq", "groq_api_key"),
         (["deepseek"], "deepseek", "deepseek_api_key"),
         (["together"], "together", "together_api_key"),
@@ -945,8 +948,6 @@ def resolve_provider_and_key(
         (["baidu", "ernie"], "baidu", "baidu_api_key"),
         (["yandex"], "yandex", "yandex_api_key"),
         (["gigachat"], "gigachat", "gigachat_api_key"),
-        (["ollama"], "ollama", None),  # self-hosted: no stored key
-        (["vllm"], "vllm", None),  # self-hosted: no stored key
         (["kimi", "moonshot"], "kimi", "kimi_api_key"),  # Moonshot AI
     ]
 

@@ -221,6 +221,18 @@ class TestResolveProviderAndKey:
         with pytest.raises(ValueError, match="No AI API key configured"):
             resolve_provider_and_key(None)
 
+    def test_ollama_preferred_is_not_routed_to_groq(self):
+        settings = self._make_settings(preferred_model="ollama")
+        provider, key = resolve_provider_and_key(settings)
+        assert provider == "ollama"
+        assert key == ""
+
+    def test_vllm_preferred_is_keyless(self):
+        settings = self._make_settings(preferred_model="vllm")
+        provider, key = resolve_provider_and_key(settings)
+        assert provider == "vllm"
+        assert key == ""
+
 
 # ── Model defaults & user-overridable model id (issue #129) ──────────────────
 
@@ -322,6 +334,52 @@ class TestModelOverride:
 
 
 class TestModelErrorSurfacing:
+    @pytest.mark.asyncio
+    async def test_keyless_local_provider_omits_authorization_header(self, monkeypatch):
+        """Ollama/vLLM accept OpenAI-compatible requests without a bearer key.
+
+        Sending ``Authorization: Bearer `` with an empty value is rejected by
+        httpx before the request reaches the local runtime.
+        """
+        from app.modules.ai import ai_client
+
+        captured: dict[str, str] = {}
+
+        class _FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, *, headers, json, timeout):  # noqa: A002, ANN001
+                captured.update(headers)
+                request = httpx.Request("POST", url)
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [{"message": {"content": "OK"}}],
+                        "usage": {"total_tokens": 2},
+                    },
+                    request=request,
+                )
+
+        monkeypatch.setattr(ai_client.httpx, "AsyncClient", _FakeClient)
+
+        text, tokens = await ai_client.call_openai_compatible(
+            "ollama",
+            "",
+            "system",
+            "prompt",
+            model="llama3.1",
+            base_url="http://localhost:11434/v1/chat/completions",
+        )
+
+        assert text == "OK"
+        assert tokens == 2
+        assert "Authorization" not in captured
+        assert captured["Content-Type"] == "application/json"
+
     @pytest.mark.asyncio
     async def test_unknown_model_message_is_actionable(self, monkeypatch):
         """A provider 400 "not a valid model ID" must produce a clear,
